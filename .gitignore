@@ -7,7 +7,6 @@ yarn-error.log
 # Build output
 build/
 lib/
-dist/
 *.tsbuildinfo
 
 # IDE
