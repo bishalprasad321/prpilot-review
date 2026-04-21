@@ -50,7 +50,7 @@ jobs:
       - name: Generate PR Description with prpilot-summary
         id: generate_desc
         if: steps.check_secrets.outputs.has_key == 'true'
-        uses: bishalprasad321/prpilot-summary@main
+        uses: bishalprasad321/prpilot-summary@v1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           llm_api_key: ${{ secrets.GEMINI_API_KEY }}
