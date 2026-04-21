@@ -1,0 +1,13 @@
+# Ignore dist folder
+dist/
+node_modules/
+
+# Ignore lock files
+package-lock.json
+yarn.lock
+
+# Build output
+*.tsbuildinfo
+
+# Config files
+action.yml

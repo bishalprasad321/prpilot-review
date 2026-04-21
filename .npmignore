@@ -1,0 +1,20 @@
+# Exclude from npm package
+
+# Dev files
+src/
+*.ts
+*.map
+
+# Config
+.eslintrc.json
+.prettierrc
+.prettierignore
+tsconfig.json
+DEVELOPMENT.md
+CONTRIBUTING.md
+.github/
+
+# Tests
+**/*.test.ts
+coverage/
+.nyc_output/

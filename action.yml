@@ -1,0 +1,58 @@
+name: "PR Pilot Review"
+description: "Intelligent multi-model consensus PR reviewer - Automated code reviews with consensus from multiple AI models."
+
+author: "Bishal Prasad"
+
+inputs:
+  github_token:
+    description: "GitHub token with permissions to read PR details and post reviews."
+    required: true
+  gemini_api_key:
+    description: "Google Gemini API key for running AI models. Get it from https://makersuite.google.com/app/apikey"
+    required: true
+  reviewer_models:
+    description: "Comma-separated list of 3 Gemini models for independent PR review (e.g., 'gemini-2.0-flash,gemini-1.5-flash,gemini-1.5-pro'). All 3 models run in parallel."
+    required: false
+    default: "gemini-2.0-flash,gemini-1.5-flash,gemini-1.5-pro"
+  judge_model:
+    description: "Gemini model for consensus judgment when reviewer opinions differ (e.g., 'gemini-2.0-flash-thinking')."
+    required: false
+    default: "gemini-2.0-flash-thinking"
+  max_consensus_rounds:
+    description: "Maximum number of consensus rounds before forcing judge decision. Each round queries all 3 reviewers again."
+    required: false
+    default: "3"
+  inline_comments_enabled:
+    description: "Enable inline code comments on specific lines where issues are found. If false, only summary comment posted."
+    required: false
+    default: "true"
+  max_diff_lines:
+    description: "Maximum diff lines to process. If diff exceeds this, will process in chunks or summarize."
+    required: false
+    default: "5000"
+  enable_incremental_diff_processing:
+    description: "Enable incremental diff processing to handle large diffs by processing them in chunks."
+    required: false
+    default: "true"
+  debug:
+    description: "Enable debug mode for verbose logging. Shows consensus rounds, model interactions, etc."
+    required: false
+    default: "false"
+
+outputs:
+  review_decision:
+    description: "Final consensus decision from judge model (APPROVE, REQUEST_CHANGES, or COMMENT)"
+  consensus_reasoning:
+    description: "Judge model's reasoning for the consensus decision"
+  consensus_round:
+    description: "Which round (1-3) consensus was achieved, or 3 if forced after max rounds"
+  review_id:
+    description: "GitHub PR review ID if successfully submitted"
+
+runs:
+  using: "node20"
+  main: "dist/index.js"
+
+branding:
+  icon: "git-pull-request"
+  color: "purple"
