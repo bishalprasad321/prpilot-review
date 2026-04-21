@@ -1,0 +1,82 @@
+name: CI - Build & Quality Checks
+
+on:
+  push:
+    branches:
+      - "*"
+  pull_request:
+    branches:
+      - main
+      - develop
+
+# Limit concurrent runs to prevent excessive resource usage
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ============================================================================
+  # Build & Quality Checks
+  # ============================================================================
+  # Runs on every push and PR. Must pass before merge.
+  # Verifies: TypeScript, Linting, Formatting, Tests, Build, Bundling
+  # Fast feedback loop (~2-3 minutes)
+  # ============================================================================
+  build:
+    name: Build & Quality Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint code
+        run: npm run lint
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Run unit tests
+        run: npm test -- --runInBand --coverage
+
+      - name: Build action bundle
+        run: npm run build
+
+      - name: Verify setup
+        run: npm run verify
+
+      - name: Verify bundled action artifact
+        run: |
+          if [ ! -f dist/index.js ]; then
+            echo "Error: dist/index.js not found"
+            exit 1
+          fi
+          echo "✓ dist/index.js verified and ready"
+
+      - name: Ensure committed dist is up to date
+        run: |
+          git config core.filemode false
+          git diff --exit-code -- dist || {
+            echo "❌ Bundled dist is out of date. Run 'npm run build' and commit changes."
+            exit 1
+          }
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: dist-${{ github.run_id }}
+          path: dist/
+          retention-days: 5

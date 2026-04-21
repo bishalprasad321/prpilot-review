@@ -1,0 +1,60 @@
+{
+  "name": "prpilot-review",
+  "version": "1.0.0",
+  "description": "Multi-model consensus AI-powered PR reviewer - Intelligent pull request reviews with automatic consensus from multiple AI models.",
+  "author": "Bishal Prasad",
+  "main": "dist/index.js",
+  "scripts": {
+    "clean": "node scripts/clean.js",
+    "build": "npm run clean && tsc --project tsconfig.json && ncc build lib/index.js -o dist --source-map && node scripts/normalize-dist-permissions.js",
+    "watch": "tsc --watch --project tsconfig.json",
+    "dev": "ts-node src/index.ts",
+    "lint": "eslint src --ext .ts",
+    "lint:fix": "eslint src --ext .ts --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "typecheck": "tsc --noEmit",
+    "verify": "node scripts/verify.js",
+    "all": "npm run lint && npm run format:check && npm run typecheck && npm run build",
+    "prepublishOnly": "npm run all",
+    "prepare": "husky install"
+  },
+  "keywords": [
+    "github",
+    "github-action",
+    "pull-request",
+    "ai",
+    "gemini",
+    "multi-model",
+    "consensus",
+    "pr-review"
+  ],
+  "dependencies": {
+    "@actions/core": "^1.11.1",
+    "@octokit/rest": "^20.1.0",
+    "node-fetch": "^2.7.0",
+    "undici": "^6.24.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/node": "^20.11.0",
+    "@types/node-fetch": "^2.6.0",
+    "@vercel/ncc": "^0.38.4",
+    "eslint": "^9.0.0",
+    "husky": "^8.0.0",
+    "jest": "^30.3.0",
+    "prettier": "^3.2.5",
+    "ts-jest": "^29.4.9",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.0",
+    "typescript-eslint": "^8.58.1"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "overrides": {
+    "undici": "^6.24.0"
+  }
+}

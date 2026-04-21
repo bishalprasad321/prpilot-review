@@ -1,0 +1,216 @@
+name: Test Action - Multi-Model Consensus Review Integration
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+    inputs:
+      debug_enabled:
+        description: "Enable debug mode"
+        required: false
+        default: "true"
+
+# Limit concurrent runs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ============================================================================
+  # Step 1: Generate PR Description (using prpilot-summary)
+  # ============================================================================
+  # First, generate an AI-powered PR description using prpilot-summary.
+  # This provides context for the multi-model consensus review.
+  # Requires secrets: GEMINI_API_KEY
+  # ============================================================================
+  generate-description:
+    name: "Step 1: Generate PR Description"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+
+    permissions:
+      pull-requests: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check if GEMINI_API_KEY exists
+        id: check_secrets
+        run: |
+          if [ -z "${{ secrets.GEMINI_API_KEY }}" ]; then
+            echo "has_key=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_key=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate PR Description with prpilot-summary
+        id: generate_desc
+        if: steps.check_secrets.outputs.has_key == 'true'
+        uses: bishalprasad321/prpilot-summary@main
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          llm_api_key: ${{ secrets.GEMINI_API_KEY }}
+          llm_provider: gemini
+          ai_model: gemini-2.5-flash
+          max_diff_lines: "5000"
+          enable_incremental_diff_processing: "true"
+          debug: ${{ inputs.debug_enabled || 'false' }}
+        continue-on-error: true
+
+      - name: Log Description Generation Results
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "Step 1: PR Description Generation"
+          echo "=========================================="
+          echo "Status: ${{ job.status }}"
+          echo "Outcome: ${{ steps.generate_desc.outcome }}"
+          echo ""
+          if [ "${{ steps.generate_desc.outcome }}" == "success" ]; then
+            echo "✅ PR description generated successfully"
+          else
+            echo "⚠️ Description generation encountered an error"
+            echo "This may be expected if:"
+            echo "  - Secrets are not configured (GEMINI_API_KEY missing)"
+            echo "  - No meaningful changes in the PR"
+            echo "  - LLM API is temporarily unavailable"
+          fi
+          echo "=========================================="
+
+  # ============================================================================
+  # Step 2: Multi-Model Consensus Code Review (using prpilot-review)
+  # ============================================================================
+  # Run multi-model consensus review after description is generated.
+  # This calls 3 independent reviewer models + 1 judge model for consensus.
+  # Requires secrets: GEMINI_API_KEY
+  # Outputs: Decision (APPROVE/REQUEST_CHANGES/COMMENT), findings, round count
+  # ============================================================================
+  consensus-review:
+    name: "Step 2: Multi-Model Consensus Review"
+    needs: generate-description
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+
+    permissions:
+      pull-requests: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check if GEMINI_API_KEY exists
+        id: check_secrets
+        run: |
+          if [ -z "${{ secrets.GEMINI_API_KEY }}" ]; then
+            echo "has_key=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_key=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Execute prpilot-review Action
+        id: consensus_review
+        if: steps.check_secrets.outputs.has_key == 'true'
+        uses: ./
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          reviewer_models: "gemini-2.0-flash,gemini-1.5-flash,gemini-1.5-pro"
+          judge_model: "gemini-2.0-flash-thinking"
+          max_consensus_rounds: "3"
+          inline_comments_enabled: "true"
+          max_diff_lines: "5000"
+          enable_incremental_diff_processing: "true"
+          debug: ${{ inputs.debug_enabled || 'false' }}
+        continue-on-error: true
+
+      - name: Log Review Execution Results
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "Step 2: Multi-Model Consensus Review"
+          echo "=========================================="
+          echo "Status: ${{ job.status }}"
+          echo "Outcome: ${{ steps.consensus_review.outcome }}"
+          echo ""
+          echo "Review Results:"
+          echo "  Decision: ${{ steps.consensus_review.outputs.review_decision }}"
+          echo "  Consensus Round: ${{ steps.consensus_review.outputs.consensus_round }}"
+          echo "  Review ID: ${{ steps.consensus_review.outputs.review_id }}"
+          echo ""
+          if [ "${{ steps.consensus_review.outcome }}" == "success" ]; then
+            echo "✅ Consensus review completed successfully"
+            echo "Decision: ${{ steps.consensus_review.outputs.review_decision }}"
+            echo "Reasoning: ${{ steps.consensus_review.outputs.consensus_reasoning }}"
+          else
+            echo "⚠️ Consensus review encountered an error"
+            echo "This may be expected if:"
+            echo "  - Secrets are not configured (GEMINI_API_KEY missing)"
+            echo "  - Reviewer/judge models not available"
+            echo "  - LLM API is temporarily unavailable"
+          fi
+          echo "=========================================="
+
+  # ============================================================================
+  # Integration Test Summary
+  # ============================================================================
+  # Summarize both steps and provide overall status
+  # ============================================================================
+  test-summary:
+    name: "Integration Test Summary"
+    needs: [generate-description, consensus-review]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create Integration Test Report
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          script: |
+            const generateDescStatus = '${{ needs.generate-description.result }}';
+            const consensusReviewStatus = '${{ needs.consensus-review.result }}';
+
+            let reportBody = '## 🤖 AI Review Workflow Report\n\n';
+            reportBody += '### Step 1: PR Description Generation\n';
+            reportBody += `- Status: ${generateDescStatus === 'success' ? '✅ Success' : '⚠️ ' + generateDescStatus}\n\n`;
+
+            reportBody += '### Step 2: Multi-Model Consensus Review\n';
+            reportBody += `- Status: ${consensusReviewStatus === 'success' ? '✅ Success' : '⚠️ ' + consensusReviewStatus}\n`;
+            reportBody += `- Decision: ${{ needs.consensus-review.outputs.review_decision || 'N/A' }}\n`;
+            reportBody += `- Consensus Round: ${{ needs.consensus-review.outputs.consensus_round || 'N/A' }}\n\n`;
+
+            reportBody += '### Workflow Status\n';
+            const allSuccess = generateDescStatus === 'success' && consensusReviewStatus === 'success';
+            reportBody += allSuccess 
+              ? '✅ **All steps completed successfully**\n'
+              : '⚠️ **One or more steps encountered issues** (check logs for details)\n';
+
+            reportBody += '\n---\n';
+            reportBody += '*This report was generated by the PR Pilot Review Integration Tests*\n';
+
+            console.log(reportBody);
+
+      - name: Print Workflow Summary
+        run: |
+          echo "=========================================="
+          echo "Integration Test Workflow Summary"
+          echo "=========================================="
+          echo ""
+          echo "Jobs Status:"
+          echo "  Generate Description: ${{ needs.generate-description.result }}"
+          echo "  Consensus Review: ${{ needs.consensus-review.result }}"
+          echo ""
+          echo "Consensus Review Outputs:"
+          echo "  Decision: ${{ needs.consensus-review.outputs.review_decision }}"
+          echo "  Round: ${{ needs.consensus-review.outputs.consensus_round }}"
+          echo "  Review ID: ${{ needs.consensus-review.outputs.review_id }}"
+          echo ""
+          echo "=========================================="
