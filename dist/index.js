@@ -368,8 +368,7 @@ class GitHubClient {
             };
         }
         catch (error) {
-            if (comments.length > 0 &&
-                this.isUnresolvableReviewCommentError(error)) {
+            if (comments.length > 0 && this.isUnresolvableReviewCommentError(error)) {
                 this.logger.warn("Inline comments could not be resolved by GitHub. Retrying with summary-only review.");
                 try {
                     const event = this.convertDecisionToEvent(decision);
