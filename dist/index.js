@@ -248,14 +248,10 @@ class GitHubClient {
      */
     async getChangedFiles(prNumber) {
         try {
-            const { data } = await this.octokit.pulls.listFiles({
-                owner: this.owner,
-                repo: this.repo,
-                pull_number: prNumber,
-                per_page: 100,
-            });
+            const data = await this.listAllFiles(prNumber);
             return data.map((file) => ({
                 filename: file.filename,
+                previousFilename: file.previous_filename,
                 status: file.status,
                 additions: file.additions,
                 deletions: file.deletions,
@@ -273,12 +269,7 @@ class GitHubClient {
      */
     async getCommits(prNumber) {
         try {
-            const { data } = await this.octokit.pulls.listCommits({
-                owner: this.owner,
-                repo: this.repo,
-                pull_number: prNumber,
-                per_page: 100,
-            });
+            const data = await this.listAllCommits(prNumber);
             return data.map((commit) => ({
                 sha: commit.sha,
                 message: commit.commit.message,
@@ -296,27 +287,8 @@ class GitHubClient {
      */
     async getDiff(prNumber) {
         try {
-            const { data } = await this.octokit.pulls.get({
-                owner: this.owner,
-                repo: this.repo,
-                pull_number: prNumber,
-            });
-            const diff = await this.octokit.repos.compareCommits({
-                owner: this.owner,
-                repo: this.repo,
-                base: data.base.sha,
-                head: data.head.sha,
-            });
-            return (diff.data.files
-                ?.map((file) => {
-                let diffContent = `diff --git a/${file.filename} b/${file.filename}\n`;
-                diffContent += `index ${file.sha?.slice(0, 7)}...${file.sha?.slice(0, 7)} 100644\n`;
-                diffContent += `--- a/${file.filename}\n`;
-                diffContent += `+++ b/${file.filename}\n`;
-                diffContent += file.patch || "";
-                return diffContent;
-            })
-                .join("\n") || "");
+            const files = await this.listAllFiles(prNumber);
+            return this.buildUnifiedDiff(files);
         }
         catch (error) {
             this.logger.error(`Failed to fetch diff for PR #${prNumber}: ${error instanceof Error ? error.message : String(error)}`);
@@ -351,6 +323,20 @@ class GitHubClient {
         }
     }
     /**
+     * Check whether PR Pilot already reviewed the current head commit.
+     */
+    async hasReviewForCommit(prNumber, headSha) {
+        try {
+            const reviews = await this.listAllReviews(prNumber);
+            return reviews.some((review) => review.commit_id === headSha &&
+                Boolean(review.body?.includes("Reviewed by PR Pilot Review")));
+        }
+        catch (error) {
+            this.logger.warn(`Failed to inspect existing reviews for PR #${prNumber}: ${error instanceof Error ? error.message : String(error)}`);
+            return false;
+        }
+    }
+    /**
      * Submit a PR review with inline comments and summary
      *
      * This creates a single review with:
@@ -358,7 +344,7 @@ class GitHubClient {
      * - A summary comment
      * - A decision (APPROVE, REQUEST_CHANGES, or COMMENT)
      */
-    async submitPRReview(prNumber, comments, decision, summaryBody) {
+    async submitPRReview(prNumber, comments, decision, summaryBody, commitSha) {
         try {
             this.logger.debug(`Submitting PR review with ${comments.length} inline comments, decision: ${decision}`);
             // Convert decision to GitHub review event
@@ -370,15 +356,7 @@ class GitHubClient {
                 side: "RIGHT",
                 body: comment.body,
             }));
-            // Submit review
-            const { data } = await this.octokit.pulls.createReview({
-                owner: this.owner,
-                repo: this.repo,
-                pull_number: prNumber,
-                event,
-                body: summaryBody,
-                comments: reviewComments,
-            });
+            const { data } = await this.createReview(prNumber, event, summaryBody, reviewComments, commitSha);
             this.logger.success(`PR review submitted successfully (ID: ${data.id}, Decision: ${data.state})`);
             return {
                 reviewId: data.id,
@@ -390,6 +368,27 @@ class GitHubClient {
             };
         }
         catch (error) {
+            if (comments.length > 0 &&
+                this.isUnresolvableReviewCommentError(error)) {
+                this.logger.warn("Inline comments could not be resolved by GitHub. Retrying with summary-only review.");
+                try {
+                    const event = this.convertDecisionToEvent(decision);
+                    const { data } = await this.createReview(prNumber, event, `${summaryBody}\n\n> Inline comments were skipped because GitHub could not resolve at least one target line in the patch.`, [], commitSha);
+                    return {
+                        reviewId: data.id,
+                        state: this.convertEventToDecision(data.state),
+                        user: {
+                            login: data.user?.login || "unknown",
+                        },
+                        body: data.body || "",
+                    };
+                }
+                catch (retryError) {
+                    this.logger.error(`Failed to submit fallback summary-only review: ${retryError instanceof Error
+                        ? retryError.message
+                        : String(retryError)}`);
+                }
+            }
             this.logger.error(`Failed to submit PR review: ${error instanceof Error ? error.message : String(error)}`);
             return null;
         }
@@ -453,6 +452,115 @@ class GitHubClient {
             default:
                 return "COMMENT";
         }
+    }
+    /**
+     * List every changed file on a PR, not just the first page.
+     */
+    async listAllFiles(prNumber) {
+        const files = [];
+        let page = 1;
+        while (true) {
+            const { data } = await this.octokit.pulls.listFiles({
+                owner: this.owner,
+                repo: this.repo,
+                pull_number: prNumber,
+                per_page: 100,
+                page,
+            });
+            files.push(...data);
+            if (data.length < 100) {
+                break;
+            }
+            page += 1;
+        }
+        return files;
+    }
+    /**
+     * List every commit on a PR.
+     */
+    async listAllCommits(prNumber) {
+        const commits = [];
+        let page = 1;
+        while (true) {
+            const { data } = await this.octokit.pulls.listCommits({
+                owner: this.owner,
+                repo: this.repo,
+                pull_number: prNumber,
+                per_page: 100,
+                page,
+            });
+            commits.push(...data);
+            if (data.length < 100) {
+                break;
+            }
+            page += 1;
+        }
+        return commits;
+    }
+    /**
+     * List every review on a PR.
+     */
+    async listAllReviews(prNumber) {
+        const reviews = [];
+        let page = 1;
+        while (true) {
+            const { data } = await this.octokit.pulls.listReviews({
+                owner: this.owner,
+                repo: this.repo,
+                pull_number: prNumber,
+                per_page: 100,
+                page,
+            });
+            reviews.push(...data);
+            if (data.length < 100) {
+                break;
+            }
+            page += 1;
+        }
+        return reviews;
+    }
+    /**
+     * Build a synthetic unified diff from the PR file list patches.
+     */
+    buildUnifiedDiff(files) {
+        return files
+            .filter((file) => Boolean(file.patch))
+            .map((file) => {
+            const oldPath = file.status === "renamed"
+                ? file.previous_filename || file.filename
+                : file.filename;
+            const fromPath = file.status === "added" ? "/dev/null" : `a/${oldPath}`;
+            const toPath = file.status === "removed" ? "/dev/null" : `b/${file.filename}`;
+            return [
+                `diff --git ${fromPath} ${toPath}`,
+                `--- ${fromPath}`,
+                `+++ ${toPath}`,
+                file.patch || "",
+            ].join("\n");
+        })
+            .join("\n");
+    }
+    /**
+     * Create a review against the current PR head.
+     */
+    async createReview(prNumber, event, body, comments, commitSha) {
+        return this.octokit.pulls.createReview({
+            owner: this.owner,
+            repo: this.repo,
+            pull_number: prNumber,
+            commit_id: commitSha,
+            event,
+            body,
+            comments,
+        });
+    }
+    /**
+     * Detect GitHub's unresolved-line validation error for inline review comments.
+     */
+    isUnresolvableReviewCommentError(error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return (message.includes("Unprocessable Entity") &&
+            message.includes("Line could not be resolved"));
     }
 }
 exports.GitHubClient = GitHubClient;
@@ -527,6 +635,12 @@ const state_manager_js_1 = __nccwpck_require__(1833);
 const review_orchestrator_js_1 = __nccwpck_require__(3134);
 const inline_comment_builder_js_1 = __nccwpck_require__(6058);
 const logger = new logger_js_1.Logger();
+const DEFAULT_REVIEWER_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+];
+const DEFAULT_JUDGE_MODEL = "gemini-2.5-pro";
 async function main() {
     const startTime = Date.now();
     logger.section("🚀 PR Pilot Review - Starting");
@@ -538,11 +652,10 @@ async function main() {
         const config = {
             githubToken: core.getInput("github_token"),
             geminiApiKey: core.getInput("gemini_api_key"),
-            reviewerModels: (core.getInput("reviewer_models") ||
-                "gemini-2.0-flash,gemini-1.5-flash,gemini-1.5-pro")
+            reviewerModels: (core.getInput("reviewer_models") || DEFAULT_REVIEWER_MODELS.join(","))
                 .split(",")
                 .map((m) => m.trim()),
-            judgeModel: core.getInput("judge_model") || "gemini-2.0-flash-thinking",
+            judgeModel: core.getInput("judge_model") || DEFAULT_JUDGE_MODEL,
             maxConsensusRounds: parseInt(core.getInput("max_consensus_rounds")) || 3,
             inlineCommentsEnabled: core.getInput("inline_comments_enabled") !== "false",
             maxDiffLines: parseInt(core.getInput("max_diff_lines")) || 5000,
@@ -615,7 +728,9 @@ async function main() {
         // STEP 5: STATE CHECK (IDEMPOTENCY)
         // =========================================================================
         logger.step(5, "Checking state (idempotency)");
-        if (stateManager.isAlreadyReviewed(prMetadata.head.sha)) {
+        const alreadyReviewedLocally = stateManager.isAlreadyReviewed(prMetadata.head.sha);
+        const alreadyReviewedOnGitHub = await gitHub.hasReviewForCommit(prNumber, prMetadata.head.sha);
+        if (alreadyReviewedLocally || alreadyReviewedOnGitHub) {
             logger.warn(`⚠️ This commit (${prMetadata.head.sha.slice(0, 7)}) was already reviewed`);
             logger.info("Skipping review to avoid duplicate work");
             core.setOutput("review_decision", "SKIPPED");
@@ -683,7 +798,7 @@ async function main() {
         if (config.inlineCommentsEnabled &&
             reviewResult.inlineFindings.length > 0) {
             const commentBuilder = new inline_comment_builder_js_1.InlineCommentBuilder(config.debug);
-            commentBuilder.buildFromDiff(files, diffContent);
+            commentBuilder.buildFromFiles(files);
             inlineComments.push(...commentBuilder.buildComments(reviewResult.inlineFindings));
         }
         logger.success("✓ Inline comments built");
@@ -692,7 +807,7 @@ async function main() {
         // STEP 11: SUBMIT PR REVIEW
         // =========================================================================
         logger.step(11, "Submitting PR review to GitHub");
-        const reviewResponse = await gitHub.submitPRReview(prNumber, inlineComments, reviewResult.finalDecision, reviewResult.summaryComment);
+        const reviewResponse = await gitHub.submitPRReview(prNumber, inlineComments, reviewResult.finalDecision, reviewResult.summaryComment, prMetadata.head.sha);
         if (!reviewResponse) {
             logger.warn("⚠️ Failed to submit PR review");
         }
@@ -771,9 +886,37 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.LLMClient = void 0;
 const node_fetch_1 = __importDefault(__nccwpck_require__(6705));
 const logger_js_1 = __nccwpck_require__(8532);
+class GeminiApiError extends Error {
+    constructor(statusCode, message) {
+        super(message);
+        this.name = "GeminiApiError";
+        this.statusCode = statusCode;
+    }
+}
+const MODEL_ALIASES = {
+    "gemini-3.0-flash": "gemini-2.5-flash",
+    "gemini-3.1-pro": "gemini-2.5-pro",
+    "gemini-2.0-flash-thinking": "gemini-2.5-pro",
+    "gemini-2.0-flash-thinking-exp": "gemini-2.5-pro",
+};
+const REVIEWER_FALLBACK_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-2.5-pro",
+];
+const JUDGE_FALLBACK_MODELS = [
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.5-flash-lite",
+];
 class LLMClient {
     constructor(apiKey, options = {}) {
         this.baseUrl = "https://generativelanguage.googleapis.com/v1beta/models";
+        this.availableGenerateContentModels = null;
+        this.resolvedModelCache = new Map();
         this.apiKey = apiKey;
         this.logger = new logger_js_1.Logger(options.debug);
         this.maxRetries = options.maxRetries || 3;
@@ -786,10 +929,11 @@ class LLMClient {
      */
     async callReviewerModel(model, context, reviewerId) {
         const prompt = this.buildReviewerPrompt(context);
-        this.logger.debug(`Calling reviewer model '${model}' (ID: ${reviewerId})...`);
+        const resolvedModel = await this.resolveModelName(model, "reviewer");
+        this.logger.debug(`Calling reviewer model '${resolvedModel}' (requested: '${model}', ID: ${reviewerId})...`);
         try {
-            const response = await this.callGeminiAPI(model, prompt);
-            const opinion = this.parseReviewerResponse(response, model, reviewerId);
+            const response = await this.callGeminiAPI(resolvedModel, prompt, this.getReviewerResponseSchema());
+            const opinion = this.parseReviewerResponse(response, resolvedModel, reviewerId);
             this.logger.debug(`Reviewer '${reviewerId}' decision: ${opinion.decision}`);
             return opinion;
         }
@@ -806,9 +950,10 @@ class LLMClient {
      */
     async callJudgeModel(model, opinions, context, roundNumber) {
         const prompt = this.buildJudgePrompt(opinions, context, roundNumber);
-        this.logger.debug(`Calling judge model '${model}' for round ${roundNumber}...`);
+        const resolvedModel = await this.resolveModelName(model, "judge");
+        this.logger.debug(`Calling judge model '${resolvedModel}' (requested: '${model}') for round ${roundNumber}...`);
         try {
-            const response = await this.callGeminiAPI(model, prompt);
+            const response = await this.callGeminiAPI(resolvedModel, prompt, this.getJudgeResponseSchema());
             const decision = this.parseJudgeResponse(response, roundNumber);
             this.logger.debug(`Judge decision: ${decision.decision}`);
             return decision;
@@ -909,7 +1054,7 @@ Guidelines:
     /**
      * Call Gemini API with retry logic
      */
-    async callGeminiAPI(model, prompt, attempt = 1) {
+    async callGeminiAPI(model, prompt, responseSchema, attempt = 1) {
         const url = `${this.baseUrl}/${model}:generateContent?key=${this.apiKey}`;
         const body = {
             contents: [
@@ -927,6 +1072,8 @@ Guidelines:
                 topK: 40,
                 topP: 0.95,
                 maxOutputTokens: 2048,
+                responseMimeType: "application/json",
+                responseJsonSchema: responseSchema,
             },
         };
         try {
@@ -939,15 +1086,15 @@ Guidelines:
             });
             if (!response.ok) {
                 const errorData = (await response.json());
-                throw new Error(`Gemini API error: ${response.status} - ${errorData.error?.message || "Unknown error"}`);
+                throw new GeminiApiError(response.status, `Gemini API error: ${response.status} - ${errorData.error?.message || "Unknown error"}`);
             }
             return (await response.json());
         }
         catch (error) {
-            if (attempt < this.maxRetries) {
+            if (attempt < this.maxRetries && this.isRetryableError(error)) {
                 this.logger.warn(`API call failed (attempt ${attempt}/${this.maxRetries}), retrying in ${this.retryDelayMs}ms...`);
                 await this.delay(this.retryDelayMs);
-                return this.callGeminiAPI(model, prompt, attempt + 1);
+                return this.callGeminiAPI(model, prompt, responseSchema, attempt + 1);
             }
             throw error;
         }
@@ -961,18 +1108,14 @@ Guidelines:
             if (!text) {
                 throw new Error("Empty response from model");
             }
-            const jsonMatch = text.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) {
-                throw new Error("Could not find JSON in response");
-            }
-            const parsed = JSON.parse(jsonMatch[0]);
+            const parsed = this.parseStructuredJson(text, "response");
             return {
                 reviewerId,
                 modelName,
-                decision: parsed.decision,
-                reasoning: parsed.reasoning,
-                findings: parsed.findings || [],
-                summary: parsed.summary,
+                decision: this.normalizeDecision(parsed.decision),
+                reasoning: parsed.reasoning || "No reasoning provided.",
+                findings: this.normalizeFindings(parsed.findings || []),
+                summary: parsed.summary || "No summary provided.",
                 timestamp: new Date().toISOString(),
             };
         }
@@ -990,15 +1133,11 @@ Guidelines:
             if (!text) {
                 throw new Error("Empty response from judge model");
             }
-            const jsonMatch = text.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) {
-                throw new Error("Could not find JSON in judge response");
-            }
-            const parsed = JSON.parse(jsonMatch[0]);
+            const parsed = this.parseStructuredJson(text, "judge response");
             return {
-                decision: parsed.decision,
-                reasoning: parsed.reasoning,
-                confidence: parsed.confidence,
+                decision: this.normalizeDecision(parsed.decision),
+                reasoning: parsed.reasoning || "No reasoning provided.",
+                confidence: this.normalizeConfidence(parsed.confidence),
                 roundsNeeded: parsed.roundsNeeded || roundNumber,
                 forcedAfterMaxRounds: false,
             };
@@ -1012,8 +1151,222 @@ Guidelines:
      * Extract text from Gemini response
      */
     extractResponseText(response) {
-        const text = response.candidates?.[0]?.content?.parts?.[0]?.text || "";
+        const text = response.candidates?.[0]?.content?.parts
+            ?.map((part) => part.text || "")
+            .join("") || "";
         return text.trim();
+    }
+    /**
+     * Resolve a requested model against the current v1beta model list.
+     *
+     * This keeps legacy aliases working when users still pass stale model IDs.
+     */
+    async resolveModelName(requestedModel, purpose) {
+        const normalizedRequestedModel = this.normalizeModelName(requestedModel);
+        const cacheKey = `${purpose}:${normalizedRequestedModel}`;
+        const cached = this.resolvedModelCache.get(cacheKey);
+        if (cached) {
+            return cached;
+        }
+        const aliasedModel = MODEL_ALIASES[normalizedRequestedModel] || normalizedRequestedModel;
+        try {
+            const availableModels = await this.getAvailableGenerateContentModels();
+            if (availableModels.has(normalizedRequestedModel)) {
+                this.resolvedModelCache.set(cacheKey, normalizedRequestedModel);
+                return normalizedRequestedModel;
+            }
+            if (availableModels.has(aliasedModel)) {
+                this.logger.warn(`Model '${normalizedRequestedModel}' is not available in v1beta. Using '${aliasedModel}' instead.`);
+                this.resolvedModelCache.set(cacheKey, aliasedModel);
+                return aliasedModel;
+            }
+            const fallbackCandidates = purpose === "judge" ? JUDGE_FALLBACK_MODELS : REVIEWER_FALLBACK_MODELS;
+            const fallback = fallbackCandidates.find((candidate) => availableModels.has(candidate));
+            if (fallback) {
+                this.logger.warn(`Model '${normalizedRequestedModel}' is unavailable for generateContent. Falling back to '${fallback}'.`);
+                this.resolvedModelCache.set(cacheKey, fallback);
+                return fallback;
+            }
+        }
+        catch (error) {
+            this.logger.warn(`Could not fetch Gemini model list for validation: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        this.resolvedModelCache.set(cacheKey, aliasedModel);
+        return aliasedModel;
+    }
+    /**
+     * Fetch the current set of models that support generateContent in v1beta.
+     */
+    async getAvailableGenerateContentModels() {
+        if (this.availableGenerateContentModels) {
+            return this.availableGenerateContentModels;
+        }
+        const availableModels = new Set();
+        let pageToken;
+        do {
+            const url = new URL(this.baseUrl);
+            url.searchParams.set("key", this.apiKey);
+            url.searchParams.set("pageSize", "1000");
+            if (pageToken) {
+                url.searchParams.set("pageToken", pageToken);
+            }
+            const response = await (0, node_fetch_1.default)(url.toString(), {
+                method: "GET",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+            });
+            if (!response.ok) {
+                const errorData = (await response.json());
+                throw new GeminiApiError(response.status, `Gemini model list error: ${response.status} - ${errorData.error?.message || "Unknown error"}`);
+            }
+            const data = (await response.json());
+            for (const model of data.models || []) {
+                const name = this.normalizeModelName(model.name || "");
+                if (name &&
+                    model.supportedGenerationMethods?.includes("generateContent")) {
+                    availableModels.add(name);
+                }
+            }
+            pageToken = data.nextPageToken;
+        } while (pageToken);
+        this.availableGenerateContentModels = availableModels;
+        return availableModels;
+    }
+    /**
+     * JSON schema for reviewer responses.
+     */
+    getReviewerResponseSchema() {
+        return {
+            type: "object",
+            properties: {
+                decision: {
+                    type: "string",
+                    enum: ["APPROVE", "REQUEST_CHANGES", "COMMENT"],
+                },
+                reasoning: { type: "string" },
+                summary: { type: "string" },
+                findings: {
+                    type: "array",
+                    items: {
+                        type: "object",
+                        properties: {
+                            file: { type: "string" },
+                            lineStart: { type: "integer" },
+                            lineEnd: { type: ["integer", "null"] },
+                            severity: {
+                                type: "string",
+                                enum: ["critical", "warning", "info"],
+                            },
+                            message: { type: "string" },
+                            suggestion: { type: ["string", "null"] },
+                        },
+                        required: ["file", "lineStart", "severity", "message"],
+                    },
+                },
+            },
+            required: ["decision", "reasoning", "summary", "findings"],
+        };
+    }
+    /**
+     * JSON schema for judge responses.
+     */
+    getJudgeResponseSchema() {
+        return {
+            type: "object",
+            properties: {
+                decision: {
+                    type: "string",
+                    enum: ["APPROVE", "REQUEST_CHANGES", "COMMENT"],
+                },
+                reasoning: { type: "string" },
+                confidence: { type: "number" },
+                needsRetry: { type: "boolean" },
+                roundsNeeded: { type: "integer" },
+            },
+            required: ["decision", "reasoning", "confidence", "roundsNeeded"],
+        };
+    }
+    /**
+     * Parse a JSON object from Gemini output.
+     */
+    parseStructuredJson(text, label) {
+        try {
+            return JSON.parse(text);
+        }
+        catch {
+            const stripped = text
+                .replace(/^```json\s*/i, "")
+                .replace(/^```\s*/i, "")
+                .replace(/\s*```$/, "")
+                .trim();
+            try {
+                return JSON.parse(stripped);
+            }
+            catch {
+                const jsonMatch = stripped.match(/\{[\s\S]*\}/);
+                if (!jsonMatch) {
+                    throw new Error(`Could not find JSON in ${label}`);
+                }
+                return JSON.parse(jsonMatch[0]);
+            }
+        }
+    }
+    /**
+     * Normalize model names so both `models/foo` and `foo` inputs work.
+     */
+    normalizeModelName(modelName) {
+        return modelName.replace(/^models\//, "").trim();
+    }
+    /**
+     * Normalize reviewer findings before they enter the rest of the pipeline.
+     */
+    normalizeFindings(findings) {
+        return findings
+            .filter((finding) => Boolean(finding.file) &&
+            Number.isFinite(finding.lineStart) &&
+            finding.lineStart > 0 &&
+            Boolean(finding.message))
+            .map((finding) => ({
+            ...finding,
+            file: finding.file.trim(),
+            lineStart: Math.trunc(finding.lineStart),
+            lineEnd: typeof finding.lineEnd === "number"
+                ? Math.trunc(finding.lineEnd)
+                : undefined,
+            severity: finding.severity || "info",
+            message: finding.message.trim(),
+            suggestion: finding.suggestion?.trim() || undefined,
+        }));
+    }
+    /**
+     * Clamp judge confidence into the expected 0-1 range.
+     */
+    normalizeConfidence(confidence) {
+        if (!Number.isFinite(confidence)) {
+            return 0;
+        }
+        return Math.max(0, Math.min(1, confidence));
+    }
+    /**
+     * Ensure the parsed decision is a supported review state.
+     */
+    normalizeDecision(decision) {
+        if (decision === "APPROVE" ||
+            decision === "REQUEST_CHANGES" ||
+            decision === "COMMENT") {
+            return decision;
+        }
+        return "COMMENT";
+    }
+    /**
+     * Retry only transient failures. 4xx model/config errors should fail fast.
+     */
+    isRetryableError(error) {
+        if (error instanceof GeminiApiError) {
+            return error.statusCode === 429 || error.statusCode >= 500;
+        }
+        return true;
     }
     /**
      * Create a failed reviewer opinion
@@ -1083,22 +1436,26 @@ class InlineCommentBuilder {
         this.logger = new logger_js_1.Logger(debug);
     }
     /**
-     * Initialize with file changes and diff content
+     * Initialize with file changes
      *
-     * Parse the diff to build a line number map for each file
+     * Parse each file patch to build a commentable line map.
      */
-    buildFromDiff(files, diffContent) {
+    buildFromFiles(files) {
         this.logger.debug(`Building inline comment maps from ${files.length} files`);
-        const diffSections = this.parseDiffSections(diffContent);
+        this.fileDiffs.clear();
         for (const file of files) {
-            const section = diffSections.find((s) => s.file === file.filename);
-            if (section) {
-                this.fileDiffs.set(file.filename, {
-                    file: file.filename,
-                    status: file.status,
-                    lines: section.lines,
-                });
+            if (!file.patch) {
+                continue;
             }
+            const patchLines = this.parsePatch(file.patch);
+            if (patchLines.length === 0) {
+                continue;
+            }
+            this.fileDiffs.set(file.filename, {
+                file: file.filename,
+                status: file.status,
+                lines: patchLines,
+            });
         }
         this.logger.debug(`Indexed ${this.fileDiffs.size} files for inline comments`);
     }
@@ -1150,77 +1507,52 @@ class InlineCommentBuilder {
         return body;
     }
     /**
-     * Parse diff content into sections by file
+     * Parse a single file patch into commentable lines.
      */
-    parseDiffSections(diffContent) {
-        const sections = [];
-        const lines = diffContent.split("\n");
-        let currentFile = null;
-        let currentLines = [];
+    parsePatch(patch) {
+        const diffLines = [];
+        const lines = patch.split("\n");
         let lineNumber = 0;
+        let hunkId = 0;
         for (const line of lines) {
-            // Detect file header: "diff --git a/path b/path"
-            if (line.startsWith("diff --git")) {
-                if (currentFile) {
-                    sections.push({
-                        file: currentFile,
-                        lines: currentLines,
-                    });
-                }
-                const match = line.match(/b\/(.+)$/);
-                currentFile = match ? match[1] : null;
-                currentLines = [];
-                lineNumber = 0;
-                continue;
-            }
-            // Skip hunk headers and other metadata
             if (line.startsWith("@@")) {
-                // Parse hunk header to get line numbers
                 const hunkMatch = line.match(/@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
                 if (hunkMatch) {
                     lineNumber = parseInt(hunkMatch[1], 10) - 1;
+                    hunkId += 1;
                 }
                 continue;
             }
-            if (!currentFile) {
-                continue;
-            }
-            // Process diff lines
-            if (line.startsWith("+") && !line.startsWith("+++")) {
-                lineNumber++;
-                currentLines.push({
+            if (line.startsWith("+")) {
+                lineNumber += 1;
+                diffLines.push({
                     type: "add",
                     lineNumber,
+                    hunkId,
                     content: line.slice(1),
                 });
+                continue;
             }
-            else if (line.startsWith("-") && !line.startsWith("---")) {
-                currentLines.push({
+            if (line.startsWith("-")) {
+                diffLines.push({
                     type: "remove",
-                    lineNumber: lineNumber,
+                    lineNumber,
+                    hunkId,
                     content: line.slice(1),
                 });
+                continue;
             }
-            else if (!line.startsWith("\\")) {
-                // Context line (not starting with +/-)
-                if (line.length > 0) {
-                    lineNumber++;
-                    currentLines.push({
-                        type: "context",
-                        lineNumber,
-                        content: line,
-                    });
-                }
+            if (!line.startsWith("\\")) {
+                lineNumber += 1;
+                diffLines.push({
+                    type: "context",
+                    lineNumber,
+                    hunkId,
+                    content: line.startsWith(" ") ? line.slice(1) : line,
+                });
             }
         }
-        // Add the last section
-        if (currentFile) {
-            sections.push({
-                file: currentFile,
-                lines: currentLines,
-            });
-        }
-        return sections;
+        return diffLines;
     }
     /**
      * Find the corresponding line in the diff
@@ -1228,29 +1560,27 @@ class InlineCommentBuilder {
      * GitHub PR review API requires the line number as it appears in the new version
      */
     findLineInDiff(diffLines, targetLine, file) {
-        // Find lines that were added or are context (visible in new version)
-        const visibleLines = diffLines.filter((l) => l.type === "add" || l.type === "context");
-        // The targetLine is based on line numbers in the new version
-        // Find the nth visible line that corresponds to this line number
-        for (const diffLine of visibleLines) {
-            if (diffLine.lineNumber === targetLine) {
-                return diffLine;
+        if (targetLine <= 0) {
+            return null;
+        }
+        const exactAddedLine = diffLines.find((line) => line.type === "add" && line.lineNumber === targetLine);
+        if (exactAddedLine) {
+            return exactAddedLine;
+        }
+        const matchingContextLine = diffLines.find((line) => line.type === "context" && line.lineNumber === targetLine);
+        if (matchingContextLine) {
+            const sameHunkAddedLines = diffLines
+                .filter((line) => line.type === "add" && line.hunkId === matchingContextLine.hunkId)
+                .sort((left, right) => Math.abs(left.lineNumber - targetLine) -
+                Math.abs(right.lineNumber - targetLine));
+            const nearestSameHunkAddedLine = sameHunkAddedLines[0];
+            if (nearestSameHunkAddedLine &&
+                Math.abs(nearestSameHunkAddedLine.lineNumber - targetLine) <= 5) {
+                this.logger.warn(`Line ${targetLine} in ${file} was unchanged in the patch. Using nearby added line ${nearestSameHunkAddedLine.lineNumber} instead.`);
+                return nearestSameHunkAddedLine;
             }
         }
-        // If exact match not found, try to find the closest line
-        let closestLine = null;
-        let closestDistance = Infinity;
-        for (const diffLine of visibleLines) {
-            const distance = Math.abs(diffLine.lineNumber - targetLine);
-            if (distance < closestDistance) {
-                closestDistance = distance;
-                closestLine = diffLine;
-            }
-        }
-        if (closestLine) {
-            this.logger.warn(`Line ${targetLine} not found in diff for ${file}, using closest line ${closestLine.lineNumber}`);
-            return closestLine;
-        }
+        this.logger.warn(`Line ${targetLine} in ${file} is not commentable in the current patch`);
         return null;
     }
     /**
@@ -1338,7 +1668,7 @@ class ReviewOrchestrator {
             // Step 2: Evaluate if consensus already achieved
             const consensusCheck = this.evaluateConsensus(opinions);
             if (consensusCheck.isConsensus) {
-                this.logger.success(`✅ Consensus achieved! All reviewers agree on: ${consensusCheck.decision}`);
+                this.logger.success(`✅ Consensus achieved! Majority decision: ${consensusCheck.decision}`);
                 finalDecision = consensusCheck.decision;
                 finalReasoning = this.formatConsensusReasoning(opinions, consensusCheck.decision, round);
                 const round_data = {
@@ -1420,29 +1750,36 @@ class ReviewOrchestrator {
     /**
      * Evaluate if consensus is achieved
      *
-     * Consensus = all 3 reviewers have the same decision
+     * Consensus = a majority (2 of 3) reviewers agree on the same decision
      */
     evaluateConsensus(opinions) {
         if (opinions.length !== 3) {
             return { isConsensus: false, decision: "COMMENT" };
         }
-        const decisions = opinions.map((o) => o.decision);
-        const uniqueDecisions = new Set(decisions);
-        if (uniqueDecisions.size === 1) {
-            // All reviewers agree
+        const decisionCounts = opinions.reduce((counts, opinion) => {
+            counts[opinion.decision] += 1;
+            return counts;
+        }, {
+            APPROVE: 0,
+            REQUEST_CHANGES: 0,
+            COMMENT: 0,
+        });
+        const majorityEntry = Object.entries(decisionCounts).find(([, count]) => count >= 2);
+        if (majorityEntry) {
             return {
                 isConsensus: true,
-                decision: decisions[0],
+                decision: majorityEntry[0],
             };
         }
         return { isConsensus: false, decision: "COMMENT" };
     }
     /**
-     * Format reasoning when all reviewers agree
+     * Format reasoning when a consensus is reached
      */
     formatConsensusReasoning(opinions, decision, round) {
         const reasons = opinions.map((o) => `- ${o.reasoning}`).join("\n");
-        return `All 3 reviewers unanimously agree on **${decision}** (Round ${round}):
+        const agreeingReviewers = opinions.filter((o) => o.decision === decision);
+        return `${agreeingReviewers.length} of 3 reviewers agreed on **${decision}** (Round ${round}):
 
 ${reasons}`;
     }

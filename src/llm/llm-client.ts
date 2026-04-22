@@ -39,11 +39,58 @@ interface GeminiResponse {
   };
 }
 
+interface GeminiModelsListResponse {
+  models?: Array<{
+    name?: string;
+    supportedGenerationMethods?: string[];
+  }>;
+  nextPageToken?: string;
+  error?: {
+    code?: number;
+    message?: string;
+    status?: string;
+  };
+}
+
 interface LLMClientOptions {
   debug?: boolean;
   maxRetries?: number;
   retryDelayMs?: number;
 }
+
+type ModelPurpose = "reviewer" | "judge";
+
+class GeminiApiError extends Error {
+  statusCode: number;
+
+  constructor(statusCode: number, message: string) {
+    super(message);
+    this.name = "GeminiApiError";
+    this.statusCode = statusCode;
+  }
+}
+
+const MODEL_ALIASES: Record<string, string> = {
+  "gemini-3.0-flash": "gemini-2.5-flash",
+  "gemini-3.1-pro": "gemini-2.5-pro",
+  "gemini-2.0-flash-thinking": "gemini-2.5-pro",
+  "gemini-2.0-flash-thinking-exp": "gemini-2.5-pro",
+};
+
+const REVIEWER_FALLBACK_MODELS = [
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-2.0-flash",
+  "gemini-2.0-flash-lite",
+  "gemini-2.5-pro",
+];
+
+const JUDGE_FALLBACK_MODELS = [
+  "gemini-2.5-pro",
+  "gemini-2.5-flash",
+  "gemini-2.0-flash",
+  "gemini-2.5-flash-lite",
+];
 
 export class LLMClient {
   private apiKey: string;
@@ -51,6 +98,8 @@ export class LLMClient {
   private maxRetries: number;
   private retryDelayMs: number;
   private baseUrl = "https://generativelanguage.googleapis.com/v1beta/models";
+  private availableGenerateContentModels: Set<string> | null = null;
+  private resolvedModelCache = new Map<string, string>();
 
   constructor(apiKey: string, options: LLMClientOptions = {}) {
     this.apiKey = apiKey;
@@ -70,14 +119,23 @@ export class LLMClient {
     reviewerId: string
   ): Promise<ReviewerOpinion> {
     const prompt = this.buildReviewerPrompt(context);
+    const resolvedModel = await this.resolveModelName(model, "reviewer");
 
     this.logger.debug(
-      `Calling reviewer model '${model}' (ID: ${reviewerId})...`
+      `Calling reviewer model '${resolvedModel}' (requested: '${model}', ID: ${reviewerId})...`
     );
 
     try {
-      const response = await this.callGeminiAPI(model, prompt);
-      const opinion = this.parseReviewerResponse(response, model, reviewerId);
+      const response = await this.callGeminiAPI(
+        resolvedModel,
+        prompt,
+        this.getReviewerResponseSchema()
+      );
+      const opinion = this.parseReviewerResponse(
+        response,
+        resolvedModel,
+        reviewerId
+      );
 
       this.logger.debug(
         `Reviewer '${reviewerId}' decision: ${opinion.decision}`
@@ -107,13 +165,18 @@ export class LLMClient {
     roundNumber: number
   ): Promise<ConsensusDecision> {
     const prompt = this.buildJudgePrompt(opinions, context, roundNumber);
+    const resolvedModel = await this.resolveModelName(model, "judge");
 
     this.logger.debug(
-      `Calling judge model '${model}' for round ${roundNumber}...`
+      `Calling judge model '${resolvedModel}' (requested: '${model}') for round ${roundNumber}...`
     );
 
     try {
-      const response = await this.callGeminiAPI(model, prompt);
+      const response = await this.callGeminiAPI(
+        resolvedModel,
+        prompt,
+        this.getJudgeResponseSchema()
+      );
       const decision = this.parseJudgeResponse(response, roundNumber);
 
       this.logger.debug(`Judge decision: ${decision.decision}`);
@@ -240,6 +303,7 @@ Guidelines:
   private async callGeminiAPI(
     model: string,
     prompt: string,
+    responseSchema: Record<string, unknown>,
     attempt: number = 1
   ): Promise<GeminiResponse> {
     const url = `${this.baseUrl}/${model}:generateContent?key=${this.apiKey}`;
@@ -260,6 +324,8 @@ Guidelines:
         topK: 40,
         topP: 0.95,
         maxOutputTokens: 2048,
+        responseMimeType: "application/json",
+        responseJsonSchema: responseSchema,
       },
     };
 
@@ -274,19 +340,20 @@ Guidelines:
 
       if (!response.ok) {
         const errorData = (await response.json()) as GeminiResponse;
-        throw new Error(
+        throw new GeminiApiError(
+          response.status,
           `Gemini API error: ${response.status} - ${errorData.error?.message || "Unknown error"}`
         );
       }
 
       return (await response.json()) as GeminiResponse;
     } catch (error) {
-      if (attempt < this.maxRetries) {
+      if (attempt < this.maxRetries && this.isRetryableError(error)) {
         this.logger.warn(
           `API call failed (attempt ${attempt}/${this.maxRetries}), retrying in ${this.retryDelayMs}ms...`
         );
         await this.delay(this.retryDelayMs);
-        return this.callGeminiAPI(model, prompt, attempt + 1);
+        return this.callGeminiAPI(model, prompt, responseSchema, attempt + 1);
       }
 
       throw error;
@@ -307,12 +374,7 @@ Guidelines:
         throw new Error("Empty response from model");
       }
 
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
-        throw new Error("Could not find JSON in response");
-      }
-
-      const parsed = JSON.parse(jsonMatch[0]) as {
+      const parsed = this.parseStructuredJson<{
         decision: ReviewDecision;
         reasoning: string;
         summary: string;
@@ -324,15 +386,15 @@ Guidelines:
           message: string;
           suggestion?: string;
         }>;
-      };
+      }>(text, "response");
 
       return {
         reviewerId,
         modelName,
-        decision: parsed.decision,
-        reasoning: parsed.reasoning,
-        findings: parsed.findings || [],
-        summary: parsed.summary,
+        decision: this.normalizeDecision(parsed.decision),
+        reasoning: parsed.reasoning || "No reasoning provided.",
+        findings: this.normalizeFindings(parsed.findings || []),
+        summary: parsed.summary || "No summary provided.",
         timestamp: new Date().toISOString(),
       };
     } catch (error) {
@@ -358,23 +420,18 @@ Guidelines:
         throw new Error("Empty response from judge model");
       }
 
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
-        throw new Error("Could not find JSON in judge response");
-      }
-
-      const parsed = JSON.parse(jsonMatch[0]) as {
+      const parsed = this.parseStructuredJson<{
         decision: ReviewDecision;
         reasoning: string;
         confidence: number;
         needsRetry?: boolean;
         roundsNeeded: number;
-      };
+      }>(text, "judge response");
 
       return {
-        decision: parsed.decision,
-        reasoning: parsed.reasoning,
-        confidence: parsed.confidence,
+        decision: this.normalizeDecision(parsed.decision),
+        reasoning: parsed.reasoning || "No reasoning provided.",
+        confidence: this.normalizeConfidence(parsed.confidence),
         roundsNeeded: parsed.roundsNeeded || roundNumber,
         forcedAfterMaxRounds: false,
       };
@@ -392,8 +449,286 @@ Guidelines:
    * Extract text from Gemini response
    */
   private extractResponseText(response: GeminiResponse): string {
-    const text = response.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    const text =
+      response.candidates?.[0]?.content?.parts
+        ?.map((part) => part.text || "")
+        .join("") || "";
     return text.trim();
+  }
+
+  /**
+   * Resolve a requested model against the current v1beta model list.
+   *
+   * This keeps legacy aliases working when users still pass stale model IDs.
+   */
+  private async resolveModelName(
+    requestedModel: string,
+    purpose: ModelPurpose
+  ): Promise<string> {
+    const normalizedRequestedModel = this.normalizeModelName(requestedModel);
+    const cacheKey = `${purpose}:${normalizedRequestedModel}`;
+    const cached = this.resolvedModelCache.get(cacheKey);
+
+    if (cached) {
+      return cached;
+    }
+
+    const aliasedModel =
+      MODEL_ALIASES[normalizedRequestedModel] || normalizedRequestedModel;
+
+    try {
+      const availableModels = await this.getAvailableGenerateContentModels();
+
+      if (availableModels.has(normalizedRequestedModel)) {
+        this.resolvedModelCache.set(cacheKey, normalizedRequestedModel);
+        return normalizedRequestedModel;
+      }
+
+      if (availableModels.has(aliasedModel)) {
+        this.logger.warn(
+          `Model '${normalizedRequestedModel}' is not available in v1beta. Using '${aliasedModel}' instead.`
+        );
+        this.resolvedModelCache.set(cacheKey, aliasedModel);
+        return aliasedModel;
+      }
+
+      const fallbackCandidates =
+        purpose === "judge" ? JUDGE_FALLBACK_MODELS : REVIEWER_FALLBACK_MODELS;
+      const fallback = fallbackCandidates.find((candidate) =>
+        availableModels.has(candidate)
+      );
+
+      if (fallback) {
+        this.logger.warn(
+          `Model '${normalizedRequestedModel}' is unavailable for generateContent. Falling back to '${fallback}'.`
+        );
+        this.resolvedModelCache.set(cacheKey, fallback);
+        return fallback;
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Could not fetch Gemini model list for validation: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+
+    this.resolvedModelCache.set(cacheKey, aliasedModel);
+    return aliasedModel;
+  }
+
+  /**
+   * Fetch the current set of models that support generateContent in v1beta.
+   */
+  private async getAvailableGenerateContentModels(): Promise<Set<string>> {
+    if (this.availableGenerateContentModels) {
+      return this.availableGenerateContentModels;
+    }
+
+    const availableModels = new Set<string>();
+    let pageToken: string | undefined;
+
+    do {
+      const url = new URL(this.baseUrl);
+      url.searchParams.set("key", this.apiKey);
+      url.searchParams.set("pageSize", "1000");
+      if (pageToken) {
+        url.searchParams.set("pageToken", pageToken);
+      }
+
+      const response = await fetch(url.toString(), {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        const errorData = (await response.json()) as GeminiModelsListResponse;
+        throw new GeminiApiError(
+          response.status,
+          `Gemini model list error: ${response.status} - ${errorData.error?.message || "Unknown error"}`
+        );
+      }
+
+      const data = (await response.json()) as GeminiModelsListResponse;
+
+      for (const model of data.models || []) {
+        const name = this.normalizeModelName(model.name || "");
+        if (
+          name &&
+          model.supportedGenerationMethods?.includes("generateContent")
+        ) {
+          availableModels.add(name);
+        }
+      }
+
+      pageToken = data.nextPageToken;
+    } while (pageToken);
+
+    this.availableGenerateContentModels = availableModels;
+    return availableModels;
+  }
+
+  /**
+   * JSON schema for reviewer responses.
+   */
+  private getReviewerResponseSchema(): Record<string, unknown> {
+    return {
+      type: "object",
+      properties: {
+        decision: {
+          type: "string",
+          enum: ["APPROVE", "REQUEST_CHANGES", "COMMENT"],
+        },
+        reasoning: { type: "string" },
+        summary: { type: "string" },
+        findings: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              file: { type: "string" },
+              lineStart: { type: "integer" },
+              lineEnd: { type: ["integer", "null"] },
+              severity: {
+                type: "string",
+                enum: ["critical", "warning", "info"],
+              },
+              message: { type: "string" },
+              suggestion: { type: ["string", "null"] },
+            },
+            required: ["file", "lineStart", "severity", "message"],
+          },
+        },
+      },
+      required: ["decision", "reasoning", "summary", "findings"],
+    };
+  }
+
+  /**
+   * JSON schema for judge responses.
+   */
+  private getJudgeResponseSchema(): Record<string, unknown> {
+    return {
+      type: "object",
+      properties: {
+        decision: {
+          type: "string",
+          enum: ["APPROVE", "REQUEST_CHANGES", "COMMENT"],
+        },
+        reasoning: { type: "string" },
+        confidence: { type: "number" },
+        needsRetry: { type: "boolean" },
+        roundsNeeded: { type: "integer" },
+      },
+      required: ["decision", "reasoning", "confidence", "roundsNeeded"],
+    };
+  }
+
+  /**
+   * Parse a JSON object from Gemini output.
+   */
+  private parseStructuredJson<T>(text: string, label: string): T {
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      const stripped = text
+        .replace(/^```json\s*/i, "")
+        .replace(/^```\s*/i, "")
+        .replace(/\s*```$/, "")
+        .trim();
+
+      try {
+        return JSON.parse(stripped) as T;
+      } catch {
+        const jsonMatch = stripped.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) {
+          throw new Error(`Could not find JSON in ${label}`);
+        }
+
+        return JSON.parse(jsonMatch[0]) as T;
+      }
+    }
+  }
+
+  /**
+   * Normalize model names so both `models/foo` and `foo` inputs work.
+   */
+  private normalizeModelName(modelName: string): string {
+    return modelName.replace(/^models\//, "").trim();
+  }
+
+  /**
+   * Normalize reviewer findings before they enter the rest of the pipeline.
+   */
+  private normalizeFindings(
+    findings: Array<{
+      file: string;
+      lineStart: number;
+      lineEnd?: number;
+      severity: "critical" | "warning" | "info";
+      message: string;
+      suggestion?: string;
+    }>
+  ): ReviewerOpinion["findings"] {
+    return findings
+      .filter(
+        (finding) =>
+          Boolean(finding.file) &&
+          Number.isFinite(finding.lineStart) &&
+          finding.lineStart > 0 &&
+          Boolean(finding.message)
+      )
+      .map((finding) => ({
+        ...finding,
+        file: finding.file.trim(),
+        lineStart: Math.trunc(finding.lineStart),
+        lineEnd:
+          typeof finding.lineEnd === "number"
+            ? Math.trunc(finding.lineEnd)
+            : undefined,
+        severity: finding.severity || "info",
+        message: finding.message.trim(),
+        suggestion: finding.suggestion?.trim() || undefined,
+      }));
+  }
+
+  /**
+   * Clamp judge confidence into the expected 0-1 range.
+   */
+  private normalizeConfidence(confidence: number): number {
+    if (!Number.isFinite(confidence)) {
+      return 0;
+    }
+
+    return Math.max(0, Math.min(1, confidence));
+  }
+
+  /**
+   * Ensure the parsed decision is a supported review state.
+   */
+  private normalizeDecision(decision: string): ReviewDecision {
+    if (
+      decision === "APPROVE" ||
+      decision === "REQUEST_CHANGES" ||
+      decision === "COMMENT"
+    ) {
+      return decision;
+    }
+
+    return "COMMENT";
+  }
+
+  /**
+   * Retry only transient failures. 4xx model/config errors should fail fast.
+   */
+  private isRetryableError(error: unknown): boolean {
+    if (error instanceof GeminiApiError) {
+      return error.statusCode === 429 || error.statusCode >= 500;
+    }
+
+    return true;
   }
 
   /**

@@ -63,8 +63,8 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
           # Optional: customize model configuration
-          # reviewer_models: "gemini-3.0-flash,gemini-2.5-flash,gemini-2.5-flash-lite"
-          # judge_model: "gemini-3.1-pro"
+          # reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash"
+          # judge_model: "gemini-2.5-pro"
           # max_consensus_rounds: "3"
           # inline_comments_enabled: "true"
 ```
@@ -82,8 +82,8 @@ with:
   gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
 
   # Optional: Model Configuration
-  reviewer_models: "gemini-3.0-flash,gemini-2.5-flash,gemini-2.5-flash-lite" # 3 models
-  judge_model: "gemini-3.1-pro" # Consensus judge
+  reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash" # 3 models
+  judge_model: "gemini-2.5-pro" # Consensus judge
   max_consensus_rounds: "3" # Max retry rounds
 
   # Optional: Features
@@ -93,6 +93,8 @@ with:
   debug: "false" # Verbose logging
 ```
 
+Use stable Gemini `v1beta` model codes. If you still pass legacy aliases such as `gemini-3.0-flash` or `gemini-3.1-pro`, the action will try to remap them to supported 2.x models before calling the API.
+
 ### Model Presets
 
 Choose models based on your needs:
@@ -100,8 +102,8 @@ Choose models based on your needs:
 #### Default (Recommended) ✅
 
 ```yaml
-reviewer_models: "gemini-3.0-flash,gemini-2.5-flash,gemini-2.5-flash-lite"
-judge_model: "gemini-3.1-pro"
+reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash"
+judge_model: "gemini-2.5-pro"
 ```
 
 Best balance of speed, quality, and cost.
@@ -109,8 +111,8 @@ Best balance of speed, quality, and cost.
 #### High Capability (Best Quality)
 
 ```yaml
-reviewer_models: "gemini-3.1-pro,gemini-2.5-pro,gemini-3.0-flash"
-judge_model: "gemini-3.1-pro"
+reviewer_models: "gemini-2.5-pro,gemini-2.5-flash,gemini-2.0-flash"
+judge_model: "gemini-2.5-pro"
 ```
 
 Uses most capable models. Higher cost but best findings.
@@ -118,8 +120,8 @@ Uses most capable models. Higher cost but best findings.
 #### Cost Optimized (Lowest Cost)
 
 ```yaml
-reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-flash-lite"
-judge_model: "gemini-2.5-pro"
+reviewer_models: "gemini-2.5-flash-lite,gemini-2.0-flash-lite,gemini-2.0-flash"
+judge_model: "gemini-2.5-flash"
 ```
 
 Uses lighter models. Lower cost but lighter analysis.
@@ -127,8 +129,8 @@ Uses lighter models. Lower cost but lighter analysis.
 #### Quality Optimized (Most Findings)
 
 ```yaml
-reviewer_models: "gemini-3.1-pro,gemini-3.0-flash,gemini-2.5-pro"
-judge_model: "gemini-3.1-pro"
+reviewer_models: "gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite"
+judge_model: "gemini-2.5-pro"
 ```
 
 Maximum detection power. Highest cost, most comprehensive reviews.
@@ -145,9 +147,9 @@ Maximum detection power. Highest cost, most comprehensive reviews.
                  ▼
 ┌─────────────────────────────────────────────┐
 │ Round 1: Query 3 Reviewers in Parallel      │
-│ - Reviewer 1: gemini-3.0-flash             │
-│ - Reviewer 2: gemini-2.5-flash             │
-│ - Reviewer 3: gemini-2.5-flash-lite        │
+│ - Reviewer 1: gemini-2.5-flash             │
+│ - Reviewer 2: gemini-2.5-flash-lite        │
+│ - Reviewer 3: gemini-2.0-flash             │
 └────────────────┬────────────────────────────┘
                  │
           ┌──────▼──────┐
@@ -163,7 +165,7 @@ Maximum detection power. Highest cost, most comprehensive reviews.
     (2 or 3 agree)   (tie-breaker)
                          │
                          ▼
-                    🏛️ gemini-3.1-pro
+                    🏛️ gemini-2.5-pro
                     Makes final decision
                          │
                          ▼

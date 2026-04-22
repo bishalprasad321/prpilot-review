@@ -35,6 +35,12 @@ interface GitHubEventPayload {
 }
 
 const logger = new Logger();
+const DEFAULT_REVIEWER_MODELS = [
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-2.0-flash",
+];
+const DEFAULT_JUDGE_MODEL = "gemini-2.5-pro";
 
 async function main() {
   const startTime = Date.now();
@@ -50,12 +56,11 @@ async function main() {
       githubToken: core.getInput("github_token"),
       geminiApiKey: core.getInput("gemini_api_key"),
       reviewerModels: (
-        core.getInput("reviewer_models") ||
-        "gemini-2.0-flash,gemini-1.5-flash,gemini-1.5-pro"
+        core.getInput("reviewer_models") || DEFAULT_REVIEWER_MODELS.join(",")
       )
         .split(",")
         .map((m) => m.trim()),
-      judgeModel: core.getInput("judge_model") || "gemini-2.0-flash-thinking",
+      judgeModel: core.getInput("judge_model") || DEFAULT_JUDGE_MODEL,
       maxConsensusRounds: parseInt(core.getInput("max_consensus_rounds")) || 3,
       inlineCommentsEnabled:
         core.getInput("inline_comments_enabled") !== "false",
@@ -162,7 +167,15 @@ async function main() {
     // =========================================================================
     logger.step(5, "Checking state (idempotency)");
 
-    if (stateManager.isAlreadyReviewed(prMetadata.head.sha)) {
+    const alreadyReviewedLocally = stateManager.isAlreadyReviewed(
+      prMetadata.head.sha
+    );
+    const alreadyReviewedOnGitHub = await gitHub.hasReviewForCommit(
+      prNumber,
+      prMetadata.head.sha
+    );
+
+    if (alreadyReviewedLocally || alreadyReviewedOnGitHub) {
       logger.warn(
         `⚠️ This commit (${prMetadata.head.sha.slice(0, 7)}) was already reviewed`
       );
@@ -260,7 +273,7 @@ async function main() {
       reviewResult.inlineFindings.length > 0
     ) {
       const commentBuilder = new InlineCommentBuilder(config.debug);
-      commentBuilder.buildFromDiff(files, diffContent);
+      commentBuilder.buildFromFiles(files);
       inlineComments.push(
         ...commentBuilder.buildComments(reviewResult.inlineFindings)
       );
@@ -278,7 +291,8 @@ async function main() {
       prNumber,
       inlineComments,
       reviewResult.finalDecision,
-      reviewResult.summaryComment
+      reviewResult.summaryComment,
+      prMetadata.head.sha
     );
 
     if (!reviewResponse) {

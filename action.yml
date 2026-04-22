@@ -11,13 +11,13 @@ inputs:
     description: "Google Gemini API key for running AI models. Get it from https://makersuite.google.com/app/apikey"
     required: true
   reviewer_models:
-    description: "Comma-separated list of 3 Gemini models for independent PR review. Optimized for speed and diversity. Available: gemini-3.0-flash, gemini-2.5-flash, gemini-2.5-flash-lite, gemini-2.5-pro, gemini-3.1-pro"
+    description: "Comma-separated list of 3 Gemini models for independent PR review. Use stable v1beta model codes such as gemini-2.5-flash, gemini-2.5-flash-lite, gemini-2.0-flash, gemini-2.0-flash-lite, or gemini-2.5-pro. Legacy 3.x aliases are auto-remapped when possible."
     required: false
-    default: "gemini-3.0-flash,gemini-2.5-flash,gemini-2.5-flash-lite"
+    default: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash"
   judge_model:
-    description: "Gemini model for consensus judgment when reviewer opinions differ. Most capable model recommended for tie-breaking logic."
+    description: "Gemini model for consensus judgment when reviewer opinions differ. For v1beta testing, gemini-2.5-pro is the strongest stable judge and gemini-2.5-flash is a lower-cost fallback."
     required: false
-    default: "gemini-3.1-pro"
+    default: "gemini-2.5-pro"
   max_consensus_rounds:
     description: "Maximum number of consensus rounds before forcing judge decision. Each round queries all 3 reviewers again."
     required: false

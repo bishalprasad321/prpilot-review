@@ -25,11 +25,11 @@ The PR Pilot Review system needed to choose:
 ## Decision
 
 **Provider:** Google Gemini API (v1beta)  
-**Approach:** Fetch-based HTTP client with structured prompting  
+**Approach:** Fetch-based HTTP client with structured outputs and runtime model validation  
 **Model Configuration:**
 
-- Reviewers: `gemini-3.0-flash`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`
-- Judge: `gemini-3.1-pro`
+- Reviewers: `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-2.0-flash`
+- Judge: `gemini-2.5-pro`
 
 ### Why Gemini?
 
@@ -47,14 +47,14 @@ The PR Pilot Review system needed to choose:
 #### Reviewers (3 models)
 
 ```
-gemini-3.0-flash     (Newest, fastest, high capability)
-gemini-2.5-flash     (Proven, stable, very fast)
+gemini-2.5-flash      (Best speed/quality balance)
 gemini-2.5-flash-lite (Ultra-fast, minimal quota usage)
+gemini-2.0-flash      (Stable second-family reviewer for diversity)
 ```
 
 **Rationale:**
 
-- **Diversity** — Different model families for varied perspective
+- **Diversity** — Mix of 2.5 and 2.0 families for varied perspective
 - **Speed** — All flash variants designed for latency
 - **Availability** — All available in v1beta
 - **Cost** — Flash models use fewer tokens than pro
@@ -63,7 +63,7 @@ gemini-2.5-flash-lite (Ultra-fast, minimal quota usage)
 #### Judge (1 model)
 
 ```
-gemini-3.1-pro (Most capable, best reasoning)
+gemini-2.5-pro (Strongest stable v1beta judge model)
 ```
 
 **Rationale:**
@@ -116,28 +116,28 @@ const response = await fetch(url, {
 }
 ```
 
-Models parse their responses using regex JSON extraction (more robust than relying on structured generation modes).
+The action requests JSON mode with a response schema, then falls back to tolerant JSON extraction only if a model still wraps the payload in prose or code fences.
 
 ## Model Availability Strategy
 
 ### v1beta API Models (As of April 2026)
 
-| Model                 | Type       | Best For                | Tier      |
-| --------------------- | ---------- | ----------------------- | --------- |
-| gemini-3.1-pro        | Advanced   | Complex reasoning       | Paid      |
-| gemini-3.0-flash      | Fast       | High-speed inference    | Free/Paid |
-| gemini-2.5-pro        | Advanced   | Quality analysis        | Paid      |
-| gemini-2.5-flash      | Fast       | Speed + quality balance | Free/Paid |
-| gemini-2.5-flash-lite | Ultra-fast | Minimal cost            | Free/Paid |
+| Model                 | Type       | Best For                         | Tier      |
+| --------------------- | ---------- | -------------------------------- | --------- |
+| gemini-2.5-pro        | Advanced   | Consensus judging, complex code  | Free/Paid |
+| gemini-2.5-flash      | Fast       | Primary reviewer                 | Free/Paid |
+| gemini-2.5-flash-lite | Ultra-fast | Low-cost reviewer                | Free/Paid |
+| gemini-2.0-flash      | Fast       | Stable fallback reviewer         | Free/Paid |
+| gemini-2.0-flash-lite | Ultra-fast | Cost-optimized fallback reviewer | Free/Paid |
 
 ### Handling Model Changes
 
 If a model becomes unavailable:
 
-1. **Graceful Degradation** — Falls back to default COMMENT decision
-2. **Error Logging** — Reports 404 (not found) or 429 (quota) explicitly
-3. **User Action** — User updates config to use different models
-4. **Monitoring** — Action logs include model availability status
+1. **Runtime validation** — Calls `models.list` and only uses models that support `generateContent`
+2. **Alias remapping** — Legacy 3.x names are remapped to supported 2.x models where possible
+3. **Graceful degradation** — Falls back to a stable reviewer/judge model before giving up
+4. **Error logging** — Reports 404 (not found) or 429 (quota) explicitly
 
 ## Cost Analysis
 
@@ -271,22 +271,22 @@ GEMINI_API_KEY=... npm test -- --integration
 ### Default (Balanced)
 
 ```yaml
-reviewer_models: "gemini-3.0-flash,gemini-2.5-flash,gemini-2.5-flash-lite"
-judge_model: "gemini-3.1-pro"
+reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash"
+judge_model: "gemini-2.5-pro"
 ```
 
 ### Cost Optimized
 
 ```yaml
-reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-flash-lite"
-judge_model: "gemini-2.5-pro"
+reviewer_models: "gemini-2.5-flash-lite,gemini-2.0-flash-lite,gemini-2.0-flash"
+judge_model: "gemini-2.5-flash"
 ```
 
 ### Quality Optimized
 
 ```yaml
-reviewer_models: "gemini-3.1-pro,gemini-3.0-flash,gemini-2.5-pro"
-judge_model: "gemini-3.1-pro"
+reviewer_models: "gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite"
+judge_model: "gemini-2.5-pro"
 ```
 
 ## Migration Path

@@ -13,6 +13,7 @@ import { CodeFinding, FileChange, ReviewComment } from "../utils/types.js";
 interface DiffLine {
   type: "add" | "remove" | "context";
   lineNumber: number;
+  hunkId: number;
   content: string;
 }
 
@@ -31,26 +32,32 @@ export class InlineCommentBuilder {
   }
 
   /**
-   * Initialize with file changes and diff content
+   * Initialize with file changes
    *
-   * Parse the diff to build a line number map for each file
+   * Parse each file patch to build a commentable line map.
    */
-  buildFromDiff(files: FileChange[], diffContent: string): void {
+  buildFromFiles(files: FileChange[]): void {
     this.logger.debug(
       `Building inline comment maps from ${files.length} files`
     );
 
-    const diffSections = this.parseDiffSections(diffContent);
+    this.fileDiffs.clear();
 
     for (const file of files) {
-      const section = diffSections.find((s) => s.file === file.filename);
-      if (section) {
-        this.fileDiffs.set(file.filename, {
-          file: file.filename,
-          status: file.status,
-          lines: section.lines,
-        });
+      if (!file.patch) {
+        continue;
       }
+
+      const patchLines = this.parsePatch(file.patch);
+      if (patchLines.length === 0) {
+        continue;
+      }
+
+      this.fileDiffs.set(file.filename, {
+        file: file.filename,
+        status: file.status,
+        lines: patchLines,
+      });
     }
 
     this.logger.debug(
@@ -133,85 +140,57 @@ export class InlineCommentBuilder {
   }
 
   /**
-   * Parse diff content into sections by file
+   * Parse a single file patch into commentable lines.
    */
-  private parseDiffSections(
-    diffContent: string
-  ): Array<{ file: string; lines: DiffLine[] }> {
-    const sections: Array<{ file: string; lines: DiffLine[] }> = [];
-
-    const lines = diffContent.split("\n");
-    let currentFile: string | null = null;
-    let currentLines: DiffLine[] = [];
+  private parsePatch(patch: string): DiffLine[] {
+    const diffLines: DiffLine[] = [];
+    const lines = patch.split("\n");
     let lineNumber = 0;
+    let hunkId = 0;
 
     for (const line of lines) {
-      // Detect file header: "diff --git a/path b/path"
-      if (line.startsWith("diff --git")) {
-        if (currentFile) {
-          sections.push({
-            file: currentFile,
-            lines: currentLines,
-          });
-        }
-
-        const match = line.match(/b\/(.+)$/);
-        currentFile = match ? match[1] : null;
-        currentLines = [];
-        lineNumber = 0;
-        continue;
-      }
-
-      // Skip hunk headers and other metadata
       if (line.startsWith("@@")) {
-        // Parse hunk header to get line numbers
         const hunkMatch = line.match(/@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
         if (hunkMatch) {
           lineNumber = parseInt(hunkMatch[1], 10) - 1;
+          hunkId += 1;
         }
         continue;
       }
 
-      if (!currentFile) {
-        continue;
-      }
-
-      // Process diff lines
-      if (line.startsWith("+") && !line.startsWith("+++")) {
-        lineNumber++;
-        currentLines.push({
+      if (line.startsWith("+")) {
+        lineNumber += 1;
+        diffLines.push({
           type: "add",
           lineNumber,
+          hunkId,
           content: line.slice(1),
         });
-      } else if (line.startsWith("-") && !line.startsWith("---")) {
-        currentLines.push({
+        continue;
+      }
+
+      if (line.startsWith("-")) {
+        diffLines.push({
           type: "remove",
-          lineNumber: lineNumber,
+          lineNumber,
+          hunkId,
           content: line.slice(1),
         });
-      } else if (!line.startsWith("\\")) {
-        // Context line (not starting with +/-)
-        if (line.length > 0) {
-          lineNumber++;
-          currentLines.push({
-            type: "context",
-            lineNumber,
-            content: line,
-          });
-        }
+        continue;
+      }
+
+      if (!line.startsWith("\\")) {
+        lineNumber += 1;
+        diffLines.push({
+          type: "context",
+          lineNumber,
+          hunkId,
+          content: line.startsWith(" ") ? line.slice(1) : line,
+        });
       }
     }
 
-    // Add the last section
-    if (currentFile) {
-      sections.push({
-        file: currentFile,
-        lines: currentLines,
-      });
-    }
-
-    return sections;
+    return diffLines;
   }
 
   /**
@@ -224,37 +203,49 @@ export class InlineCommentBuilder {
     targetLine: number,
     file: string
   ): DiffLine | null {
-    // Find lines that were added or are context (visible in new version)
-    const visibleLines = diffLines.filter(
-      (l) => l.type === "add" || l.type === "context"
+    if (targetLine <= 0) {
+      return null;
+    }
+
+    const exactAddedLine = diffLines.find(
+      (line) => line.type === "add" && line.lineNumber === targetLine
+    );
+    if (exactAddedLine) {
+      return exactAddedLine;
+    }
+
+    const matchingContextLine = diffLines.find(
+      (line) => line.type === "context" && line.lineNumber === targetLine
     );
 
-    // The targetLine is based on line numbers in the new version
-    // Find the nth visible line that corresponds to this line number
-    for (const diffLine of visibleLines) {
-      if (diffLine.lineNumber === targetLine) {
-        return diffLine;
+    if (matchingContextLine) {
+      const sameHunkAddedLines = diffLines
+        .filter(
+          (line) =>
+            line.type === "add" && line.hunkId === matchingContextLine.hunkId
+        )
+        .sort(
+          (left, right) =>
+            Math.abs(left.lineNumber - targetLine) -
+            Math.abs(right.lineNumber - targetLine)
+        );
+
+      const nearestSameHunkAddedLine = sameHunkAddedLines[0];
+
+      if (
+        nearestSameHunkAddedLine &&
+        Math.abs(nearestSameHunkAddedLine.lineNumber - targetLine) <= 5
+      ) {
+        this.logger.warn(
+          `Line ${targetLine} in ${file} was unchanged in the patch. Using nearby added line ${nearestSameHunkAddedLine.lineNumber} instead.`
+        );
+        return nearestSameHunkAddedLine;
       }
     }
 
-    // If exact match not found, try to find the closest line
-    let closestLine: DiffLine | null = null;
-    let closestDistance = Infinity;
-
-    for (const diffLine of visibleLines) {
-      const distance = Math.abs(diffLine.lineNumber - targetLine);
-      if (distance < closestDistance) {
-        closestDistance = distance;
-        closestLine = diffLine;
-      }
-    }
-
-    if (closestLine) {
-      this.logger.warn(
-        `Line ${targetLine} not found in diff for ${file}, using closest line ${closestLine.lineNumber}`
-      );
-      return closestLine;
-    }
+    this.logger.warn(
+      `Line ${targetLine} in ${file} is not commentable in the current patch`
+    );
 
     return null;
   }

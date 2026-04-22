@@ -81,7 +81,7 @@ export class ReviewOrchestrator {
 
       if (consensusCheck.isConsensus) {
         this.logger.success(
-          `✅ Consensus achieved! All reviewers agree on: ${consensusCheck.decision}`
+          `✅ Consensus achieved! Majority decision: ${consensusCheck.decision}`
         );
         finalDecision = consensusCheck.decision;
         finalReasoning = this.formatConsensusReasoning(
@@ -222,7 +222,7 @@ export class ReviewOrchestrator {
   /**
    * Evaluate if consensus is achieved
    *
-   * Consensus = all 3 reviewers have the same decision
+   * Consensus = a majority (2 of 3) reviewers agree on the same decision
    */
   private evaluateConsensus(opinions: ReviewerOpinion[]): {
     isConsensus: boolean;
@@ -232,14 +232,26 @@ export class ReviewOrchestrator {
       return { isConsensus: false, decision: "COMMENT" };
     }
 
-    const decisions = opinions.map((o) => o.decision);
-    const uniqueDecisions = new Set(decisions);
+    const decisionCounts = opinions.reduce<Record<ReviewDecision, number>>(
+      (counts, opinion) => {
+        counts[opinion.decision] += 1;
+        return counts;
+      },
+      {
+        APPROVE: 0,
+        REQUEST_CHANGES: 0,
+        COMMENT: 0,
+      }
+    );
 
-    if (uniqueDecisions.size === 1) {
-      // All reviewers agree
+    const majorityEntry = Object.entries(decisionCounts).find(
+      ([, count]) => count >= 2
+    );
+
+    if (majorityEntry) {
       return {
         isConsensus: true,
-        decision: decisions[0],
+        decision: majorityEntry[0] as ReviewDecision,
       };
     }
 
@@ -247,7 +259,7 @@ export class ReviewOrchestrator {
   }
 
   /**
-   * Format reasoning when all reviewers agree
+   * Format reasoning when a consensus is reached
    */
   private formatConsensusReasoning(
     opinions: ReviewerOpinion[],
@@ -255,8 +267,9 @@ export class ReviewOrchestrator {
     round: number
   ): string {
     const reasons = opinions.map((o) => `- ${o.reasoning}`).join("\n");
+    const agreeingReviewers = opinions.filter((o) => o.decision === decision);
 
-    return `All 3 reviewers unanimously agree on **${decision}** (Round ${round}):
+    return `${agreeingReviewers.length} of 3 reviewers agreed on **${decision}** (Round ${round}):
 
 ${reasons}`;
   }

@@ -37,6 +37,7 @@ export type FileChangeStatus =
 
 export interface FileChange {
   filename: string;
+  previousFilename?: string;
   status: FileChangeStatus;
   additions: number;
   deletions: number;

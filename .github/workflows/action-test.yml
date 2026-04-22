@@ -119,23 +119,23 @@ jobs:
           PRESET="${{ inputs.model_preset || 'default' }}"
           case $PRESET in
             high-capability)
-              echo "reviewer_models=gemini-3.1-pro,gemini-2.5-pro,gemini-3.0-flash" >> $GITHUB_OUTPUT
-              echo "judge_model=gemini-3.1-pro" >> $GITHUB_OUTPUT
+              echo "reviewer_models=gemini-2.5-pro,gemini-2.5-flash,gemini-2.0-flash" >> $GITHUB_OUTPUT
+              echo "judge_model=gemini-2.5-pro" >> $GITHUB_OUTPUT
               echo "preset_name=High Capability (Best Quality)" >> $GITHUB_OUTPUT
               ;;
             cost-optimized)
-              echo "reviewer_models=gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-flash-lite" >> $GITHUB_OUTPUT
-              echo "judge_model=gemini-2.5-pro" >> $GITHUB_OUTPUT
+              echo "reviewer_models=gemini-2.5-flash-lite,gemini-2.0-flash-lite,gemini-2.0-flash" >> $GITHUB_OUTPUT
+              echo "judge_model=gemini-2.5-flash" >> $GITHUB_OUTPUT
               echo "preset_name=Cost Optimized (Lower Cost)" >> $GITHUB_OUTPUT
               ;;
             quality-optimized)
-              echo "reviewer_models=gemini-3.1-pro,gemini-3.0-flash,gemini-2.5-pro" >> $GITHUB_OUTPUT
-              echo "judge_model=gemini-3.1-pro" >> $GITHUB_OUTPUT
+              echo "reviewer_models=gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite" >> $GITHUB_OUTPUT
+              echo "judge_model=gemini-2.5-pro" >> $GITHUB_OUTPUT
               echo "preset_name=Quality Optimized (Best Findings)" >> $GITHUB_OUTPUT
               ;;
             *)
-              echo "reviewer_models=gemini-3.0-flash,gemini-2.5-flash,gemini-2.5-flash-lite" >> $GITHUB_OUTPUT
-              echo "judge_model=gemini-3.1-pro" >> $GITHUB_OUTPUT
+              echo "reviewer_models=gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash" >> $GITHUB_OUTPUT
+              echo "judge_model=gemini-2.5-pro" >> $GITHUB_OUTPUT
               echo "preset_name=Default (Balanced)" >> $GITHUB_OUTPUT
               ;;
           esac
@@ -191,7 +191,7 @@ jobs:
             echo "⚠️ Consensus review encountered an error"
             echo "This may be expected if:"
             echo "  - Secrets are not configured (GEMINI_API_KEY missing)"
-            echo "  - Selected models not available in v1beta API"
+            echo "  - Selected models are not valid Gemini v1beta model codes"
             echo "  - API quota exceeded (check API key billing settings)"
             echo "  - Reviewer/judge models not available"
             echo "  - LLM API is temporarily unavailable"
