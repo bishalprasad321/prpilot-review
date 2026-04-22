@@ -404,13 +404,24 @@ Guidelines:
     reviewerId: string,
     error: unknown
   ): ReviewerOpinion {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+
+    // Log if this is a model availability or quota issue
+    if (errorMsg.includes("404") || errorMsg.includes("not found")) {
+      this.logger.error(
+        `⚠️ Model not available: '${modelName}' - Check Gemini API documentation for available models in v1beta`
+      );
+    } else if (errorMsg.includes("429") || errorMsg.includes("quota")) {
+      this.logger.error(
+        `⚠️ API Quota exceeded for model '${modelName}' - Upgrade billing or wait for quota reset`
+      );
+    }
+
     return {
       reviewerId,
       modelName,
       decision: "COMMENT",
-      reasoning: `Reviewer model failed: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      reasoning: `Reviewer model '${modelName}' failed: ${errorMsg}. Fallback to COMMENT decision.`,
       findings: [],
       summary: "Review could not be completed due to API error",
       timestamp: new Date().toISOString(),
