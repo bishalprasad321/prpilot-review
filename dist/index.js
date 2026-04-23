@@ -1164,7 +1164,7 @@ Guidelines:
             };
         }
         catch (error) {
-            this.logger.warn(`Reviewer '${modelName}' returned non-JSON output. Falling back to text parsing.`);
+            this.logger.warn(`Reviewer '${modelName}' returned non-JSON output. Falling back to text parsing. Error details: ${error instanceof Error ? error.message : String(error)}`);
             return {
                 reviewerId,
                 modelName,
@@ -1195,7 +1195,7 @@ Guidelines:
             };
         }
         catch (error) {
-            this.logger.warn(`Judge response was not valid JSON. Falling back to heuristic parsing.`);
+            this.logger.warn(`Judge response was not valid JSON. Falling back to heuristic parsing. Error details: ${error instanceof Error ? error.message : String(error)}`);
             return {
                 decision: this.extractDecisionFromText(text),
                 reasoning: text,
