@@ -28,7 +28,7 @@ The PR Pilot Review system needed to choose:
 **Approach:** Fetch-based HTTP client with structured outputs and runtime model validation  
 **Model Configuration:**
 
-- Reviewers: `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-2.0-flash`
+- Reviewers: `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-2.5-pro`
 - Judge: `gemini-2.5-pro`
 
 ### Why Gemini?
@@ -49,12 +49,12 @@ The PR Pilot Review system needed to choose:
 ```
 gemini-2.5-flash      (Best speed/quality balance)
 gemini-2.5-flash-lite (Ultra-fast, minimal quota usage)
-gemini-2.0-flash      (Stable second-family reviewer for diversity)
+gemini-2.5-pro        (High-capability fallback when 2.0 quotas are unavailable)
 ```
 
 **Rationale:**
 
-- **Diversity** — Mix of 2.5 and 2.0 families for varied perspective
+- **Diversity** — Mix of 2.5 flash/pro behaviors for varied perspective
 - **Speed** — All flash variants designed for latency
 - **Availability** — All available in v1beta
 - **Cost** — Flash models use fewer tokens than pro
@@ -122,13 +122,13 @@ The action requests JSON mode with a response schema, then falls back to toleran
 
 ### v1beta API Models (As of April 2026)
 
-| Model                 | Type       | Best For                         | Tier      |
-| --------------------- | ---------- | -------------------------------- | --------- |
-| gemini-2.5-pro        | Advanced   | Consensus judging, complex code  | Free/Paid |
-| gemini-2.5-flash      | Fast       | Primary reviewer                 | Free/Paid |
-| gemini-2.5-flash-lite | Ultra-fast | Low-cost reviewer                | Free/Paid |
-| gemini-2.0-flash      | Fast       | Stable fallback reviewer         | Free/Paid |
-| gemini-2.0-flash-lite | Ultra-fast | Cost-optimized fallback reviewer | Free/Paid |
+| Model                 | Type       | Best For                          | Tier      |
+| --------------------- | ---------- | --------------------------------- | --------- |
+| gemini-2.5-pro        | Advanced   | Consensus judging, complex code   | Free/Paid |
+| gemini-2.5-flash      | Fast       | Primary reviewer                  | Free/Paid |
+| gemini-2.5-flash-lite | Ultra-fast | Low-cost reviewer                 | Free/Paid |
+| gemini-2.0-flash      | Fast       | Optional legacy fallback reviewer | Free/Paid |
+| gemini-2.0-flash-lite | Ultra-fast | Optional cost fallback reviewer   | Free/Paid |
 
 ### Handling Model Changes
 
@@ -271,14 +271,14 @@ GEMINI_API_KEY=... npm test -- --integration
 ### Default (Balanced)
 
 ```yaml
-reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash"
+reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-pro"
 judge_model: "gemini-2.5-pro"
 ```
 
 ### Cost Optimized
 
 ```yaml
-reviewer_models: "gemini-2.5-flash-lite,gemini-2.0-flash-lite,gemini-2.0-flash"
+reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-flash-lite"
 judge_model: "gemini-2.5-flash"
 ```
 

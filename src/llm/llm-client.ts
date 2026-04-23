@@ -80,9 +80,9 @@ const MODEL_ALIASES: Record<string, string> = {
 const REVIEWER_FALLBACK_MODELS = [
   "gemini-2.5-flash",
   "gemini-2.5-flash-lite",
+  "gemini-2.5-pro",
   "gemini-2.0-flash",
   "gemini-2.0-flash-lite",
-  "gemini-2.5-pro",
 ];
 
 const JUDGE_FALLBACK_MODELS = [
@@ -119,18 +119,42 @@ export class LLMClient {
     reviewerId: string
   ): Promise<ReviewerOpinion> {
     const prompt = this.buildReviewerPrompt(context);
-    const resolvedModel = await this.resolveModelName(model, "reviewer");
+    let resolvedModel = await this.resolveModelName(model, "reviewer");
 
     this.logger.debug(
       `Calling reviewer model '${resolvedModel}' (requested: '${model}', ID: ${reviewerId})...`
     );
 
     try {
-      const response = await this.callGeminiAPI(
-        resolvedModel,
-        prompt,
-        this.getReviewerResponseSchema()
-      );
+      let response: GeminiResponse;
+
+      try {
+        response = await this.callGeminiAPI(
+          resolvedModel,
+          prompt,
+          this.getReviewerResponseSchema()
+        );
+      } catch (error) {
+        const backupModel = await this.resolveBackupModel("reviewer", [
+          resolvedModel,
+          model,
+        ]);
+
+        if (backupModel && this.isModelFailureError(error)) {
+          this.logger.warn(
+            `Reviewer model '${resolvedModel}' failed. Retrying once with backup model '${backupModel}'.`
+          );
+          resolvedModel = backupModel;
+          response = await this.callGeminiAPI(
+            resolvedModel,
+            prompt,
+            this.getReviewerResponseSchema()
+          );
+        } else {
+          throw error;
+        }
+      }
+
       const opinion = this.parseReviewerResponse(
         response,
         resolvedModel,
@@ -165,18 +189,42 @@ export class LLMClient {
     roundNumber: number
   ): Promise<ConsensusDecision> {
     const prompt = this.buildJudgePrompt(opinions, context, roundNumber);
-    const resolvedModel = await this.resolveModelName(model, "judge");
+    let resolvedModel = await this.resolveModelName(model, "judge");
 
     this.logger.debug(
       `Calling judge model '${resolvedModel}' (requested: '${model}') for round ${roundNumber}...`
     );
 
     try {
-      const response = await this.callGeminiAPI(
-        resolvedModel,
-        prompt,
-        this.getJudgeResponseSchema()
-      );
+      let response: GeminiResponse;
+
+      try {
+        response = await this.callGeminiAPI(
+          resolvedModel,
+          prompt,
+          this.getJudgeResponseSchema()
+        );
+      } catch (error) {
+        const backupModel = await this.resolveBackupModel("judge", [
+          resolvedModel,
+          model,
+        ]);
+
+        if (backupModel && this.isModelFailureError(error)) {
+          this.logger.warn(
+            `Judge model '${resolvedModel}' failed. Retrying once with backup model '${backupModel}'.`
+          );
+          resolvedModel = backupModel;
+          response = await this.callGeminiAPI(
+            resolvedModel,
+            prompt,
+            this.getJudgeResponseSchema()
+          );
+        } else {
+          throw error;
+        }
+      }
+
       const decision = this.parseJudgeResponse(response, roundNumber);
 
       this.logger.debug(`Judge decision: ${decision.decision}`);
@@ -203,13 +251,7 @@ export class LLMClient {
       )
       .join("\n");
 
-    const diffPreview = context.chunks
-      .slice(0, 3)
-      .map(
-        (c) =>
-          `\n\`\`\`${c.language || "diff"}\n${c.content.slice(0, 500)}\n...\n\`\`\``
-      )
-      .join("\n");
+    const diffPreview = this.buildDiffPreview(context);
 
     return `You are an expert code reviewer. Analyze this pull request and provide your review opinion.
 
@@ -245,7 +287,14 @@ Be thorough but concise. Focus on:
 2. Potential bugs or issues
 3. Performance concerns
 4. Security implications
-5. Testing coverage`;
+5. Testing coverage
+
+Important constraints:
+- Only report findings for files and changed lines that are explicitly shown in the diff snippets above
+- Do not guess line numbers
+- If you are not confident about an exact changed line, omit that finding instead of inventing one
+- Return valid JSON only, with no markdown fences or extra prose
+- Keep findings limited to high-signal issues only`;
   }
 
   /**
@@ -368,12 +417,12 @@ Guidelines:
     modelName: string,
     reviewerId: string
   ): ReviewerOpinion {
-    try {
-      const text = this.extractResponseText(response);
-      if (!text) {
-        throw new Error("Empty response from model");
-      }
+    const text = this.extractResponseText(response);
+    if (!text) {
+      throw new Error("Empty response from model");
+    }
 
+    try {
       const parsed = this.parseStructuredJson<{
         decision: ReviewDecision;
         reasoning: string;
@@ -398,12 +447,19 @@ Guidelines:
         timestamp: new Date().toISOString(),
       };
     } catch (error) {
-      this.logger.error(
-        `Failed to parse reviewer response: ${
-          error instanceof Error ? error.message : String(error)
-        }`
+      this.logger.warn(
+        `Reviewer '${modelName}' returned non-JSON output. Falling back to text parsing. Error details: ${error instanceof Error ? error.message : String(error)}`
       );
-      throw error;
+
+      return {
+        reviewerId,
+        modelName,
+        decision: this.extractDecisionFromText(text),
+        reasoning: text,
+        findings: [],
+        summary: text.slice(0, 300),
+        timestamp: new Date().toISOString(),
+      };
     }
   }
 
@@ -414,12 +470,12 @@ Guidelines:
     response: GeminiResponse,
     roundNumber: number
   ): ConsensusDecision {
-    try {
-      const text = this.extractResponseText(response);
-      if (!text) {
-        throw new Error("Empty response from judge model");
-      }
+    const text = this.extractResponseText(response);
+    if (!text) {
+      throw new Error("Empty response from judge model");
+    }
 
+    try {
       const parsed = this.parseStructuredJson<{
         decision: ReviewDecision;
         reasoning: string;
@@ -436,12 +492,17 @@ Guidelines:
         forcedAfterMaxRounds: false,
       };
     } catch (error) {
-      this.logger.error(
-        `Failed to parse judge response: ${
-          error instanceof Error ? error.message : String(error)
-        }`
+      this.logger.warn(
+        `Judge response was not valid JSON. Falling back to heuristic parsing. Error details: ${error instanceof Error ? error.message : String(error)}`
       );
-      throw error;
+
+      return {
+        decision: this.extractDecisionFromText(text),
+        reasoning: text,
+        confidence: 0.35,
+        roundsNeeded: roundNumber,
+        forcedAfterMaxRounds: false,
+      };
     }
   }
 
@@ -515,6 +576,33 @@ Guidelines:
 
     this.resolvedModelCache.set(cacheKey, aliasedModel);
     return aliasedModel;
+  }
+
+  /**
+   * Choose a backup model when the requested model is blocked or unavailable.
+   */
+  private async resolveBackupModel(
+    purpose: ModelPurpose,
+    excludedModels: string[]
+  ): Promise<string | null> {
+    const normalizedExclusions = new Set(
+      excludedModels.map((model) => this.normalizeModelName(model))
+    );
+
+    try {
+      const availableModels = await this.getAvailableGenerateContentModels();
+      const fallbackCandidates =
+        purpose === "judge" ? JUDGE_FALLBACK_MODELS : REVIEWER_FALLBACK_MODELS;
+
+      const backupModel = fallbackCandidates.find(
+        (candidate) =>
+          !normalizedExclusions.has(candidate) && availableModels.has(candidate)
+      );
+
+      return backupModel || null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -653,6 +741,34 @@ Guidelines:
   }
 
   /**
+   * Build a bounded diff preview so reviewers have enough context without
+   * exhausting prompt budget.
+   */
+  private buildDiffPreview(context: LLMContext): string {
+    const sections: string[] = [];
+    let totalChars = 0;
+    const maxChars = 12000;
+
+    for (const chunk of context.chunks) {
+      const snippet = [
+        `File: ${chunk.file}`,
+        `\`\`\`${chunk.language || "diff"}`,
+        chunk.content.slice(0, 1200),
+        `\`\`\``,
+      ].join("\n");
+
+      if (totalChars + snippet.length > maxChars) {
+        break;
+      }
+
+      sections.push(snippet);
+      totalChars += snippet.length;
+    }
+
+    return sections.join("\n\n");
+  }
+
+  /**
    * Normalize model names so both `models/foo` and `foo` inputs work.
    */
   private normalizeModelName(modelName: string): string {
@@ -721,6 +837,26 @@ Guidelines:
   }
 
   /**
+   * Heuristic fallback when a model ignored JSON mode but still returned text.
+   */
+  private extractDecisionFromText(text: string): ReviewDecision {
+    const normalized = text.toUpperCase();
+
+    if (
+      normalized.includes("REQUEST_CHANGES") ||
+      normalized.includes("CHANGES REQUESTED")
+    ) {
+      return "REQUEST_CHANGES";
+    }
+
+    if (normalized.includes("APPROVE") || normalized.includes("APPROVED")) {
+      return "APPROVE";
+    }
+
+    return "COMMENT";
+  }
+
+  /**
    * Retry only transient failures. 4xx model/config errors should fail fast.
    */
   private isRetryableError(error: unknown): boolean {
@@ -729,6 +865,18 @@ Guidelines:
     }
 
     return true;
+  }
+
+  /**
+   * Detect errors where another model is worth trying.
+   */
+  private isModelFailureError(error: unknown): boolean {
+    if (error instanceof GeminiApiError) {
+      return error.statusCode === 404 || error.statusCode === 429;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    return message.includes("404") || message.includes("429");
   }
 
   /**

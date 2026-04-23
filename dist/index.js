@@ -633,11 +633,12 @@ const diff_processor_js_1 = __nccwpck_require__(6130);
 const state_manager_js_1 = __nccwpck_require__(1833);
 const review_orchestrator_js_1 = __nccwpck_require__(3134);
 const inline_comment_builder_js_1 = __nccwpck_require__(6058);
+const formatter_js_1 = __nccwpck_require__(9232);
 const logger = new logger_js_1.Logger();
 const DEFAULT_REVIEWER_MODELS = [
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-    "gemini-2.0-flash",
+    "gemini-2.5-pro",
 ];
 const DEFAULT_JUDGE_MODEL = "gemini-2.5-pro";
 async function main() {
@@ -794,11 +795,17 @@ async function main() {
         // =========================================================================
         logger.step(10, "Building inline comments");
         const inlineComments = [];
-        if (config.inlineCommentsEnabled &&
-            reviewResult.inlineFindings.length > 0) {
+        if (reviewResult.inlineFindings.length > 0) {
             const commentBuilder = new inline_comment_builder_js_1.InlineCommentBuilder(config.debug);
             commentBuilder.buildFromFiles(files);
-            inlineComments.push(...commentBuilder.buildComments(reviewResult.inlineFindings));
+            const validFindings = commentBuilder.filterCommentableFindings(reviewResult.inlineFindings);
+            if (validFindings.length !== reviewResult.inlineFindings.length) {
+                reviewResult.inlineFindings = validFindings;
+                reviewResult.summaryComment = new formatter_js_1.Formatter().formatReviewComment(reviewResult);
+            }
+            if (config.inlineCommentsEnabled) {
+                inlineComments.push(...commentBuilder.buildComments(validFindings));
+            }
         }
         logger.success("✓ Inline comments built");
         logger.info(`  - Comments: ${inlineComments.length}`);
@@ -901,9 +908,9 @@ const MODEL_ALIASES = {
 const REVIEWER_FALLBACK_MODELS = [
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
+    "gemini-2.5-pro",
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
-    "gemini-2.5-pro",
 ];
 const JUDGE_FALLBACK_MODELS = [
     "gemini-2.5-pro",
@@ -928,10 +935,27 @@ class LLMClient {
      */
     async callReviewerModel(model, context, reviewerId) {
         const prompt = this.buildReviewerPrompt(context);
-        const resolvedModel = await this.resolveModelName(model, "reviewer");
+        let resolvedModel = await this.resolveModelName(model, "reviewer");
         this.logger.debug(`Calling reviewer model '${resolvedModel}' (requested: '${model}', ID: ${reviewerId})...`);
         try {
-            const response = await this.callGeminiAPI(resolvedModel, prompt, this.getReviewerResponseSchema());
+            let response;
+            try {
+                response = await this.callGeminiAPI(resolvedModel, prompt, this.getReviewerResponseSchema());
+            }
+            catch (error) {
+                const backupModel = await this.resolveBackupModel("reviewer", [
+                    resolvedModel,
+                    model,
+                ]);
+                if (backupModel && this.isModelFailureError(error)) {
+                    this.logger.warn(`Reviewer model '${resolvedModel}' failed. Retrying once with backup model '${backupModel}'.`);
+                    resolvedModel = backupModel;
+                    response = await this.callGeminiAPI(resolvedModel, prompt, this.getReviewerResponseSchema());
+                }
+                else {
+                    throw error;
+                }
+            }
             const opinion = this.parseReviewerResponse(response, resolvedModel, reviewerId);
             this.logger.debug(`Reviewer '${reviewerId}' decision: ${opinion.decision}`);
             return opinion;
@@ -949,10 +973,27 @@ class LLMClient {
      */
     async callJudgeModel(model, opinions, context, roundNumber) {
         const prompt = this.buildJudgePrompt(opinions, context, roundNumber);
-        const resolvedModel = await this.resolveModelName(model, "judge");
+        let resolvedModel = await this.resolveModelName(model, "judge");
         this.logger.debug(`Calling judge model '${resolvedModel}' (requested: '${model}') for round ${roundNumber}...`);
         try {
-            const response = await this.callGeminiAPI(resolvedModel, prompt, this.getJudgeResponseSchema());
+            let response;
+            try {
+                response = await this.callGeminiAPI(resolvedModel, prompt, this.getJudgeResponseSchema());
+            }
+            catch (error) {
+                const backupModel = await this.resolveBackupModel("judge", [
+                    resolvedModel,
+                    model,
+                ]);
+                if (backupModel && this.isModelFailureError(error)) {
+                    this.logger.warn(`Judge model '${resolvedModel}' failed. Retrying once with backup model '${backupModel}'.`);
+                    resolvedModel = backupModel;
+                    response = await this.callGeminiAPI(resolvedModel, prompt, this.getJudgeResponseSchema());
+                }
+                else {
+                    throw error;
+                }
+            }
             const decision = this.parseJudgeResponse(response, roundNumber);
             this.logger.debug(`Judge decision: ${decision.decision}`);
             return decision;
@@ -970,10 +1011,7 @@ class LLMClient {
         const filesInfo = context.files
             .map((f) => `- ${f.filename} (${f.status}): +${f.additions}/-${f.deletions}`)
             .join("\n");
-        const diffPreview = context.chunks
-            .slice(0, 3)
-            .map((c) => `\n\`\`\`${c.language || "diff"}\n${c.content.slice(0, 500)}\n...\n\`\`\``)
-            .join("\n");
+        const diffPreview = this.buildDiffPreview(context);
         return `You are an expert code reviewer. Analyze this pull request and provide your review opinion.
 
 **PR Title:** ${context.prTitle}
@@ -1008,7 +1046,14 @@ Be thorough but concise. Focus on:
 2. Potential bugs or issues
 3. Performance concerns
 4. Security implications
-5. Testing coverage`;
+5. Testing coverage
+
+Important constraints:
+- Only report findings for files and changed lines that are explicitly shown in the diff snippets above
+- Do not guess line numbers
+- If you are not confident about an exact changed line, omit that finding instead of inventing one
+- Return valid JSON only, with no markdown fences or extra prose
+- Keep findings limited to high-signal issues only`;
     }
     /**
      * Build prompt for judge model
@@ -1102,11 +1147,11 @@ Guidelines:
      * Parse reviewer model response
      */
     parseReviewerResponse(response, modelName, reviewerId) {
+        const text = this.extractResponseText(response);
+        if (!text) {
+            throw new Error("Empty response from model");
+        }
         try {
-            const text = this.extractResponseText(response);
-            if (!text) {
-                throw new Error("Empty response from model");
-            }
             const parsed = this.parseStructuredJson(text, "response");
             return {
                 reviewerId,
@@ -1119,19 +1164,27 @@ Guidelines:
             };
         }
         catch (error) {
-            this.logger.error(`Failed to parse reviewer response: ${error instanceof Error ? error.message : String(error)}`);
-            throw error;
+            this.logger.warn(`Reviewer '${modelName}' returned non-JSON output. Falling back to text parsing.`);
+            return {
+                reviewerId,
+                modelName,
+                decision: this.extractDecisionFromText(text),
+                reasoning: text,
+                findings: [],
+                summary: text.slice(0, 300),
+                timestamp: new Date().toISOString(),
+            };
         }
     }
     /**
      * Parse judge model response
      */
     parseJudgeResponse(response, roundNumber) {
+        const text = this.extractResponseText(response);
+        if (!text) {
+            throw new Error("Empty response from judge model");
+        }
         try {
-            const text = this.extractResponseText(response);
-            if (!text) {
-                throw new Error("Empty response from judge model");
-            }
             const parsed = this.parseStructuredJson(text, "judge response");
             return {
                 decision: this.normalizeDecision(parsed.decision),
@@ -1142,8 +1195,14 @@ Guidelines:
             };
         }
         catch (error) {
-            this.logger.error(`Failed to parse judge response: ${error instanceof Error ? error.message : String(error)}`);
-            throw error;
+            this.logger.warn(`Judge response was not valid JSON. Falling back to heuristic parsing.`);
+            return {
+                decision: this.extractDecisionFromText(text),
+                reasoning: text,
+                confidence: 0.35,
+                roundsNeeded: roundNumber,
+                forcedAfterMaxRounds: false,
+            };
         }
     }
     /**
@@ -1192,6 +1251,21 @@ Guidelines:
         }
         this.resolvedModelCache.set(cacheKey, aliasedModel);
         return aliasedModel;
+    }
+    /**
+     * Choose a backup model when the requested model is blocked or unavailable.
+     */
+    async resolveBackupModel(purpose, excludedModels) {
+        const normalizedExclusions = new Set(excludedModels.map((model) => this.normalizeModelName(model)));
+        try {
+            const availableModels = await this.getAvailableGenerateContentModels();
+            const fallbackCandidates = purpose === "judge" ? JUDGE_FALLBACK_MODELS : REVIEWER_FALLBACK_MODELS;
+            const backupModel = fallbackCandidates.find((candidate) => !normalizedExclusions.has(candidate) && availableModels.has(candidate));
+            return backupModel || null;
+        }
+        catch {
+            return null;
+        }
     }
     /**
      * Fetch the current set of models that support generateContent in v1beta.
@@ -1312,6 +1386,29 @@ Guidelines:
         }
     }
     /**
+     * Build a bounded diff preview so reviewers have enough context without
+     * exhausting prompt budget.
+     */
+    buildDiffPreview(context) {
+        const sections = [];
+        let totalChars = 0;
+        const maxChars = 12000;
+        for (const chunk of context.chunks) {
+            const snippet = [
+                `File: ${chunk.file}`,
+                `\`\`\`${chunk.language || "diff"}`,
+                chunk.content.slice(0, 1200),
+                `\`\`\``,
+            ].join("\n");
+            if (totalChars + snippet.length > maxChars) {
+                break;
+            }
+            sections.push(snippet);
+            totalChars += snippet.length;
+        }
+        return sections.join("\n\n");
+    }
+    /**
      * Normalize model names so both `models/foo` and `foo` inputs work.
      */
     normalizeModelName(modelName) {
@@ -1359,6 +1456,20 @@ Guidelines:
         return "COMMENT";
     }
     /**
+     * Heuristic fallback when a model ignored JSON mode but still returned text.
+     */
+    extractDecisionFromText(text) {
+        const normalized = text.toUpperCase();
+        if (normalized.includes("REQUEST_CHANGES") ||
+            normalized.includes("CHANGES REQUESTED")) {
+            return "REQUEST_CHANGES";
+        }
+        if (normalized.includes("APPROVE") || normalized.includes("APPROVED")) {
+            return "APPROVE";
+        }
+        return "COMMENT";
+    }
+    /**
      * Retry only transient failures. 4xx model/config errors should fail fast.
      */
     isRetryableError(error) {
@@ -1366,6 +1477,16 @@ Guidelines:
             return error.statusCode === 429 || error.statusCode >= 500;
         }
         return true;
+    }
+    /**
+     * Detect errors where another model is worth trying.
+     */
+    isModelFailureError(error) {
+        if (error instanceof GeminiApiError) {
+            return error.statusCode === 404 || error.statusCode === 429;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        return message.includes("404") || message.includes("429");
     }
     /**
      * Create a failed reviewer opinion
@@ -1491,6 +1612,18 @@ class InlineCommentBuilder {
         }
         this.logger.info(`Built ${comments.length} inline comments from findings`);
         return comments;
+    }
+    /**
+     * Keep only findings that can be mapped to the current patch.
+     */
+    filterCommentableFindings(findings) {
+        return findings.filter((finding) => {
+            const fileDiff = this.fileDiffs.get(finding.file);
+            if (!fileDiff) {
+                return false;
+            }
+            return Boolean(this.findLineInDiff(fileDiff.lines, finding.lineStart, finding.file));
+        });
     }
     /**
      * Build comment body from a finding
@@ -2083,6 +2216,150 @@ class StateManager {
 }
 exports.StateManager = StateManager;
 //# sourceMappingURL=state-manager.js.map
+
+/***/ }),
+
+/***/ 9232:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * Formatter utility for converting review output to Markdown
+ *
+ * Handles:
+ * - Format review findings as Markdown
+ * - Format PR review comments
+ * - Format inline code snippets
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.Formatter = void 0;
+class Formatter {
+    /**
+     * Format review findings as a Markdown list
+     */
+    formatFindings(findings) {
+        if (findings.length === 0) {
+            return "No issues found.";
+        }
+        const grouped = this.groupFindingsByFile(findings);
+        let markdown = "";
+        for (const [file, fileFi] of Object.entries(grouped)) {
+            markdown += `\n### 📄 ${file}\n`;
+            for (const finding of fileFi) {
+                const severity = this.formatSeverity(finding.severity);
+                const lineInfo = finding.lineEnd && finding.lineEnd !== finding.lineStart
+                    ? `Lines ${finding.lineStart}-${finding.lineEnd}`
+                    : `Line ${finding.lineStart}`;
+                markdown += `\n${severity} **${lineInfo}**: ${finding.message}`;
+                if (finding.suggestion) {
+                    markdown += `\n> 💡 Suggestion: ${finding.suggestion}`;
+                }
+                markdown += "\n";
+            }
+        }
+        return markdown;
+    }
+    /**
+     * Format review result as PR comment
+     */
+    formatReviewComment(result) {
+        const decisionEmoji = this.getDecisionEmoji(result.finalDecision);
+        const decisionText = this.formatDecision(result.finalDecision);
+        let comment = `## ${decisionEmoji} PR Review - ${decisionText}\n\n`;
+        comment += `**Consensus reached in round ${result.consensusRound} of ${result.totalRounds}**\n\n`;
+        comment += `### Judge Reasoning\n${result.consensusReasoning}\n\n`;
+        if (result.inlineFindings.length > 0) {
+            comment += `### Code Findings\n`;
+            comment += this.formatFindings(result.inlineFindings);
+            comment += "\n";
+        }
+        comment += `---\n`;
+        comment += `*Generated by PR Pilot Review - Multi-Model Consensus AI Review*\n`;
+        comment += `📅 ${new Date(result.timestamp).toLocaleString()}\n`;
+        return comment;
+    }
+    /**
+     * Group findings by file
+     */
+    groupFindingsByFile(findings) {
+        const grouped = {};
+        for (const finding of findings) {
+            if (!grouped[finding.file]) {
+                grouped[finding.file] = [];
+            }
+            grouped[finding.file].push(finding);
+        }
+        // Sort findings within each file by line number
+        for (const file of Object.keys(grouped)) {
+            grouped[file].sort((a, b) => a.lineStart - b.lineStart);
+        }
+        return grouped;
+    }
+    /**
+     * Get emoji for severity level
+     */
+    formatSeverity(severity) {
+        switch (severity) {
+            case "critical":
+                return "🔴 **CRITICAL**";
+            case "warning":
+                return "🟡 **WARNING**";
+            case "info":
+                return "🔵 **INFO**";
+            default:
+                return "ℹ️";
+        }
+    }
+    /**
+     * Get emoji for decision
+     */
+    getDecisionEmoji(decision) {
+        switch (decision) {
+            case "APPROVE":
+                return "✅";
+            case "REQUEST_CHANGES":
+                return "❌";
+            case "COMMENT":
+                return "💬";
+            default:
+                return "❓";
+        }
+    }
+    /**
+     * Format decision text
+     */
+    formatDecision(decision) {
+        switch (decision) {
+            case "APPROVE":
+                return "Approved";
+            case "REQUEST_CHANGES":
+                return "Changes Requested";
+            case "COMMENT":
+                return "Comment";
+            default:
+                return "Unknown";
+        }
+    }
+    /**
+     * Format code snippet with line numbers
+     */
+    formatCodeSnippet(code, startLine, context = 2) {
+        const lines = code.split("\n");
+        const start = Math.max(0, startLine - 1 - context);
+        const end = Math.min(lines.length, startLine + context);
+        let snippet = "```\n";
+        for (let i = start; i < end; i++) {
+            const lineNum = i + 1;
+            const marker = lineNum === startLine ? "→ " : "  ";
+            snippet += `${marker}${lineNum.toString().padStart(4, " ")}: ${lines[i]}\n`;
+        }
+        snippet += "```";
+        return snippet;
+    }
+}
+exports.Formatter = Formatter;
+//# sourceMappingURL=formatter.js.map
 
 /***/ }),
 

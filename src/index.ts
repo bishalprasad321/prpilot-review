@@ -25,6 +25,7 @@ import { DiffProcessor } from "./diff/diff-processor.js";
 import { StateManager } from "./state/state-manager.js";
 import { ReviewOrchestrator } from "./review/review-orchestrator.js";
 import { InlineCommentBuilder } from "./review/inline-comment-builder.js";
+import { Formatter } from "./utils/formatter.js";
 import { ActionConfig, LLMContext, ReviewComment } from "./utils/types.js";
 
 interface GitHubEventPayload {
@@ -38,7 +39,7 @@ const logger = new Logger();
 const DEFAULT_REVIEWER_MODELS = [
   "gemini-2.5-flash",
   "gemini-2.5-flash-lite",
-  "gemini-2.0-flash",
+  "gemini-2.5-pro",
 ];
 const DEFAULT_JUDGE_MODEL = "gemini-2.5-pro";
 
@@ -268,15 +269,23 @@ async function main() {
 
     const inlineComments: ReviewComment[] = [];
 
-    if (
-      config.inlineCommentsEnabled &&
-      reviewResult.inlineFindings.length > 0
-    ) {
+    if (reviewResult.inlineFindings.length > 0) {
       const commentBuilder = new InlineCommentBuilder(config.debug);
       commentBuilder.buildFromFiles(files);
-      inlineComments.push(
-        ...commentBuilder.buildComments(reviewResult.inlineFindings)
+      const validFindings = commentBuilder.filterCommentableFindings(
+        reviewResult.inlineFindings
       );
+
+      if (validFindings.length !== reviewResult.inlineFindings.length) {
+        reviewResult.inlineFindings = validFindings;
+        reviewResult.summaryComment = new Formatter().formatReviewComment(
+          reviewResult
+        );
+      }
+
+      if (config.inlineCommentsEnabled) {
+        inlineComments.push(...commentBuilder.buildComments(validFindings));
+      }
     }
 
     logger.success("✓ Inline comments built");

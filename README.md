@@ -63,7 +63,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
           # Optional: customize model configuration
-          # reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash"
+          # reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-pro"
           # judge_model: "gemini-2.5-pro"
           # max_consensus_rounds: "3"
           # inline_comments_enabled: "true"
@@ -82,7 +82,7 @@ with:
   gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
 
   # Optional: Model Configuration
-  reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash" # 3 models
+  reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-pro" # 3 models
   judge_model: "gemini-2.5-pro" # Consensus judge
   max_consensus_rounds: "3" # Max retry rounds
 
@@ -102,7 +102,7 @@ Choose models based on your needs:
 #### Default (Recommended) ✅
 
 ```yaml
-reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash"
+reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-pro"
 judge_model: "gemini-2.5-pro"
 ```
 
@@ -111,7 +111,7 @@ Best balance of speed, quality, and cost.
 #### High Capability (Best Quality)
 
 ```yaml
-reviewer_models: "gemini-2.5-pro,gemini-2.5-flash,gemini-2.0-flash"
+reviewer_models: "gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite"
 judge_model: "gemini-2.5-pro"
 ```
 
@@ -120,7 +120,7 @@ Uses most capable models. Higher cost but best findings.
 #### Cost Optimized (Lowest Cost)
 
 ```yaml
-reviewer_models: "gemini-2.5-flash-lite,gemini-2.0-flash-lite,gemini-2.0-flash"
+reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-flash-lite"
 judge_model: "gemini-2.5-flash"
 ```
 
@@ -149,7 +149,7 @@ Maximum detection power. Highest cost, most comprehensive reviews.
 │ Round 1: Query 3 Reviewers in Parallel      │
 │ - Reviewer 1: gemini-2.5-flash             │
 │ - Reviewer 2: gemini-2.5-flash-lite        │
-│ - Reviewer 3: gemini-2.0-flash             │
+│ - Reviewer 3: gemini-2.5-pro               │
 └────────────────┬────────────────────────────┘
                  │
           ┌──────▼──────┐

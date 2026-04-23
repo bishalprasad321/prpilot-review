@@ -122,6 +122,23 @@ export class InlineCommentBuilder {
   }
 
   /**
+   * Keep only findings that can be mapped to the current patch.
+   */
+  filterCommentableFindings(findings: CodeFinding[]): CodeFinding[] {
+    return findings.filter((finding) => {
+      const fileDiff = this.fileDiffs.get(finding.file);
+
+      if (!fileDiff) {
+        return false;
+      }
+
+      return Boolean(
+        this.findLineInDiff(fileDiff.lines, finding.lineStart, finding.file)
+      );
+    });
+  }
+
+  /**
    * Build comment body from a finding
    */
   private buildCommentBody(finding: CodeFinding): string {

@@ -13,7 +13,7 @@ inputs:
   reviewer_models:
     description: "Comma-separated list of 3 Gemini models for independent PR review. Use stable v1beta model codes such as gemini-2.5-flash, gemini-2.5-flash-lite, gemini-2.0-flash, gemini-2.0-flash-lite, or gemini-2.5-pro. Legacy 3.x aliases are auto-remapped when possible."
     required: false
-    default: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash"
+    default: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-pro"
   judge_model:
     description: "Gemini model for consensus judgment when reviewer opinions differ. For v1beta testing, gemini-2.5-pro is the strongest stable judge and gemini-2.5-flash is a lower-cost fallback."
     required: false
