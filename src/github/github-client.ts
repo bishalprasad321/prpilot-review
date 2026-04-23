@@ -347,7 +347,22 @@ export class GitHubClient {
   private convertDecisionToEvent(
     decision: ReviewDecision
   ): "APPROVE" | "REQUEST_CHANGES" | "COMMENT" {
+    // GitHub Actions cannot approve pull requests (security policy)
+    // Map APPROVE → COMMENT when running in GitHub Actions
+    if (decision === "APPROVE" && this.isGitHubActionsEnvironment()) {
+      this.logger.warn(
+        "⚠️ GitHub Actions cannot approve PRs (security policy). Converting APPROVE → COMMENT."
+      );
+      return "COMMENT";
+    }
     return decision;
+  }
+
+  /**
+   * Check if running in GitHub Actions environment
+   */
+  private isGitHubActionsEnvironment(): boolean {
+    return process.env.GITHUB_ACTIONS === "true";
   }
 
   /**

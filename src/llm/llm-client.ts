@@ -265,36 +265,52 @@ ${filesInfo}
 **Code Changes:**
 ${diffPreview}
 
-Please provide your review in the following JSON format:
+CRITICAL: ONLY respond with valid JSON. Do NOT include any markdown formatting, code blocks, or prose outside the JSON.
+
+Respond with EXACTLY this JSON format (all fields required):
 {
   "decision": "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
-  "reasoning": "Your reasoning for this decision",
-  "summary": "Brief summary of the PR",
+  "reasoning": "Your detailed reasoning for this decision",
+  "summary": "Brief 1-2 sentence summary of the PR",
   "findings": [
     {
-      "file": "path/to/file",
+      "file": "path/to/file.ts",
       "lineStart": 10,
       "lineEnd": 12,
       "severity": "critical" | "warning" | "info",
-      "message": "What's wrong",
-      "suggestion": "How to fix it"
+      "message": "Specific code issue found",
+      "suggestion": "How to fix it (optional)"
     }
   ]
 }
 
-Be thorough but concise. Focus on:
+INSTRUCTIONS FOR FINDINGS:
+- You MUST analyze the code and find actual issues
+- Report findings for specific lines shown in the diff
+- Use exact file names and line numbers from the diff
+- Each finding MUST reference a specific changed line
+- Severity levels: "critical" = security/crash bugs, "warning" = quality/performance issues, "info" = minor improvements
+- Return empty array [] if code is good with no issues found
+
+Examples of good findings:
+- "Missing null check on user object before accessing .email property"
+- "SQL injection vulnerability: user input not sanitized in query"
+- "Variable declared but never used"
+- "Inefficient O(n²) loop can be optimized to O(n)"
+
+Be thorough and concise. Focus on:
 1. Code quality and best practices
 2. Potential bugs or issues
 3. Performance concerns
 4. Security implications
 5. Testing coverage
+6. Code style violations
 
-Important constraints:
-- Only report findings for files and changed lines that are explicitly shown in the diff snippets above
-- Do not guess line numbers
-- If you are not confident about an exact changed line, omit that finding instead of inventing one
-- Return valid JSON only, with no markdown fences or extra prose
-- Keep findings limited to high-signal issues only`;
+Important:
+- Only report findings for files explicitly shown in the diff
+- Verify line numbers match the diff context
+- Do NOT guess or invent line numbers
+- Return valid JSON with no extra text`;
   }
 
   /**
@@ -328,22 +344,24 @@ Your task:
 1. Analyze each reviewer's opinion
 2. Identify areas of agreement and disagreement
 3. Make a final consensus decision considering all perspectives
-4. If opinions strongly differ, you may request another round of reviews OR make a final judgment call
 
-Respond in JSON format:
+CRITICAL: ONLY respond with valid JSON. Do NOT include any markdown, code blocks, or explanatory text.
+
+Respond with EXACTLY this JSON format (all fields required):
 {
   "decision": "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
-  "reasoning": "Your reasoning synthesizing all opinions",
+  "reasoning": "Your reasoning synthesizing all reviewer opinions",
   "confidence": 0.95,
   "needsRetry": false,
   "roundsNeeded": ${roundNumber}
 }
 
-Guidelines:
-- If 2+ reviewers agree, typically that's consensus
-- If all 3 disagree, use your judgment to find the best path forward
-- confidence: how confident you are (0-1)
-- needsRetry: true only if you think another round would help (max 3 rounds)`;
+Decision rules:
+- "APPROVE": All reviewers agree OR 2+ approve with no critical findings
+- "REQUEST_CHANGES": 2+ found critical issues OR unanimous REQUEST_CHANGES
+- "COMMENT": Mixed opinions with minor issues
+
+Return valid JSON only, no extra text`;
   }
 
   /**
@@ -451,12 +469,15 @@ Guidelines:
         `Reviewer '${modelName}' returned non-JSON output. Falling back to text parsing. Error details: ${error instanceof Error ? error.message : String(error)}`
       );
 
+      // Extract findings from text response (don't lose findings!)
+      const findings = this.extractFindingsFromText(text);
+
       return {
         reviewerId,
         modelName,
         decision: this.extractDecisionFromText(text),
         reasoning: text,
-        findings: [],
+        findings,
         summary: text.slice(0, 300),
         timestamp: new Date().toISOString(),
       };
@@ -854,6 +875,79 @@ Guidelines:
     }
 
     return "COMMENT";
+  }
+
+  /**
+   * Extract findings from text when JSON parsing fails.
+   * Looks for patterns like "file.ts:line" or common issue descriptions.
+   */
+  private extractFindingsFromText(
+    text: string
+  ): Array<{
+    file: string;
+    lineStart: number;
+    lineEnd?: number;
+    severity: "critical" | "warning" | "info";
+    message: string;
+    suggestion?: string;
+  }> {
+    const findings = [];
+
+    // Pattern 1: "file.ts:123 - message" or "file.ts (line 123) - message"
+    const fileLinePattern =
+      /([^\s:]+\.(?:ts|js|tsx|jsx|py|go|java|rs|cpp|c|h|rb|php|cs|swift))[:\s]*(?:line\s*)?(\d+)[\s-]*([^\n]+)/gi;
+    let match;
+
+    while ((match = fileLinePattern.exec(text)) !== null) {
+      const [, file, lineStr, message] = match;
+      const lineNum = parseInt(lineStr, 10);
+
+      if (file && !isNaN(lineNum)) {
+        findings.push({
+          file,
+          lineStart: lineNum,
+          severity: this.detectSeverityFromText(message),
+          message: message.trim().slice(0, 200),
+        });
+      }
+    }
+
+    // Deduplicate findings by file+line+message
+    const seen = new Set<string>();
+    return findings.filter((f) => {
+      const key = `${f.file}:${f.lineStart}:${f.message}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  /**
+   * Detect severity level from text patterns
+   */
+  private detectSeverityFromText(
+    text: string
+  ): "critical" | "warning" | "info" {
+    const normalized = text.toUpperCase();
+
+    if (
+      normalized.includes("CRITICAL") ||
+      normalized.includes("SECURITY") ||
+      normalized.includes("BUG") ||
+      normalized.includes("ERROR")
+    ) {
+      return "critical";
+    }
+
+    if (
+      normalized.includes("WARNING") ||
+      normalized.includes("ISSUE") ||
+      normalized.includes("PROBLEM")
+    ) {
+      return "warning";
+    }
+
+    return "info";
   }
 
   /**
