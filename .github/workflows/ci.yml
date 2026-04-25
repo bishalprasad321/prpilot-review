@@ -48,10 +48,6 @@ jobs:
       - name: Check formatting
         run: npm run format:check
 
-      # TODO: Re-enable tests once we have stable test cases and CI environment
-      #   - name: Run unit tests
-      #     run: npm test -- --runInBand --coverage
-
       - name: Build action bundle
         run: npm run build
 

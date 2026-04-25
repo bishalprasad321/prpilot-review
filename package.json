@@ -14,6 +14,7 @@
     "build": "npm run clean && tsc && ncc build lib/index.js -o dist --source-map",
     "lint": "eslint src",
     "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "test": "jest",
     "typecheck": "tsc --noEmit",
     "verify": "npm run lint && npm run typecheck && npm run test && npm run build",
