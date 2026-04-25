@@ -60,14 +60,13 @@ export class Formatter {
     return [
       `# Multi-Model Consensus Review: ${decisionText}`,
       `## Consensus Process`,
-      `- Consensus Achieved: Round ${result.consensusRound}`,
-      `- Models reviewed: Reviewer [${result.reviewerModels.join(", ")}] + Judge [${result.judgeModel}]`,
-      `- Tokens Used: ${tokenCount}`,
+      `- Consensus Achieved: **Round ${result.consensusRound}**`,
+      `- Models reviewed: Reviewers \`${result.reviewerModels.join(", ")}\` + Judge \`${result.judgeModel}\``,
+      `- API Tokens Used: ${tokenCount}`,
       "",
       findingsText,
       "---",
-      "Reviewed by PR Pilot Review - AI-powered Multi-Model Consensus Review System",
-      "---",
+      "*Reviewed by PR Pilot Review - AI-powered Multi-Model Consensus Review System*",
     ].join("\n");
   }
 
