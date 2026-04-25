@@ -10,21 +10,14 @@
     "README.md"
   ],
   "scripts": {
-    "clean": "node scripts/clean.js",
-    "build": "npm run clean && tsc --project tsconfig.json && ncc build lib/index.js -o dist --source-map && node scripts/normalize-dist-permissions.js",
-    "watch": "tsc --watch --project tsconfig.json",
-    "dev": "ts-node src/index.ts",
-    "lint": "eslint src --ext .ts",
-    "lint:fix": "eslint src --ext .ts --fix",
-    "format": "prettier --write \"src/**/*.ts\"",
-    "format:check": "prettier --check \"src/**/*.ts\"",
+    "clean": "rimraf lib dist",
+    "build": "npm run clean && tsc && ncc build lib/index.js -o dist --source-map",
+    "lint": "eslint src",
+    "format": "prettier --write .",
     "test": "jest",
-    "test:watch": "jest --watch",
     "typecheck": "tsc --noEmit",
-    "verify": "node scripts/verify.js",
-    "all": "npm run lint && npm run format:check && npm run typecheck && npm run build",
-    "prepublishOnly": "npm run all",
-    "prepare": "husky install"
+    "verify": "npm run lint && npm run typecheck && npm run test && npm run build",
+    "release": "changeset version && changeset publish"
   },
   "keywords": [
     "github",
@@ -40,14 +33,15 @@
     "@actions/core": "^1.11.1",
     "@octokit/rest": "^20.1.0",
     "node-fetch": "^2.7.0",
-    "undici": "^6.24.0"
+    "undici": "^6.24.0",
+    "rimraf": "^6.1.3"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "^20.19.39",
     "@types/node-fetch": "^2.6.0",
-    "@vercel/ncc": "latest",
+    "@vercel/ncc": "^0.38.4",
     "eslint": "^9.0.0",
     "husky": "^8.0.0",
     "jest": "^30.3.0",

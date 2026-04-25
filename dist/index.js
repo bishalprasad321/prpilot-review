@@ -54,6 +54,7 @@ const LANGUAGE_MAP = {
     ".sql": "sql",
 };
 class DiffProcessor {
+    logger;
     constructor(debug = false) {
         this.logger = new logger_js_1.Logger(debug);
     }
@@ -211,6 +212,10 @@ exports.GitHubClient = void 0;
 const rest_1 = __nccwpck_require__(5772);
 const logger_js_1 = __nccwpck_require__(8532);
 class GitHubClient {
+    octokit;
+    owner;
+    repo;
+    logger;
     constructor(githubToken, config, debug = false) {
         this.octokit = new rest_1.Octokit({ auth: githubToken });
         this.owner = config.owner;
@@ -867,6 +872,7 @@ async function main() {
 }
 // Run main
 main().catch((error) => {
+    // eslint-disable-next-line no-console
     console.error("Uncaught error:", error);
     process.exit(1);
 });
@@ -896,6 +902,7 @@ exports.LLMClient = void 0;
 const node_fetch_1 = __importDefault(__nccwpck_require__(6705));
 const logger_js_1 = __nccwpck_require__(8532);
 class GeminiApiError extends Error {
+    statusCode;
     constructor(statusCode, message) {
         super(message);
         this.name = "GeminiApiError";
@@ -922,11 +929,15 @@ const JUDGE_FALLBACK_MODELS = [
     "gemini-2.5-flash-lite",
 ];
 class LLMClient {
+    apiKey;
+    logger;
+    maxRetries;
+    retryDelayMs;
+    baseUrl = "https://generativelanguage.googleapis.com/v1beta/models";
+    availableGenerateContentModels = null;
+    resolvedModelCache = new Map();
+    totalTokens = { prompt: 0, completion: 0, total: 0 };
     constructor(apiKey, options = {}) {
-        this.baseUrl = "https://generativelanguage.googleapis.com/v1beta/models";
-        this.availableGenerateContentModels = null;
-        this.resolvedModelCache = new Map();
-        this.totalTokens = { prompt: 0, completion: 0, total: 0 };
         this.apiKey = apiKey;
         this.logger = new logger_js_1.Logger(options.debug);
         this.maxRetries = options.maxRetries || 3;
@@ -1717,8 +1728,9 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.InlineCommentBuilder = void 0;
 const logger_js_1 = __nccwpck_require__(8532);
 class InlineCommentBuilder {
+    logger;
+    fileDiffs = new Map();
     constructor(debug = false) {
-        this.fileDiffs = new Map();
         this.logger = new logger_js_1.Logger(debug);
     }
     /**
@@ -1929,6 +1941,12 @@ const logger_js_1 = __nccwpck_require__(8532);
 const llm_client_js_1 = __nccwpck_require__(6147);
 const formatter_js_1 = __nccwpck_require__(9232);
 class ReviewOrchestrator {
+    llmClient;
+    logger;
+    reviewerModels;
+    judgeModel;
+    maxConsensusRounds;
+    formatter;
     constructor(apiKey, options) {
         this.llmClient = new llm_client_js_1.LLMClient(apiKey, { debug: options.debug });
         this.logger = new logger_js_1.Logger(options.debug);
@@ -2202,6 +2220,9 @@ const path = __importStar(__nccwpck_require__(6928));
 const logger_js_1 = __nccwpck_require__(8532);
 const STATE_FILE = ".ai-pr-state.json";
 class StateManager {
+    logger;
+    stateFilePath;
+    state;
     constructor(workingDir, debug = false) {
         this.logger = new logger_js_1.Logger(debug);
         this.stateFilePath = path.join(workingDir || process.cwd(), STATE_FILE);
@@ -2458,9 +2479,11 @@ exports.Formatter = Formatter;
  *
  * Provides debug, info, warn, and error logging with optional debug mode
  */
+/* eslint-disable no-console */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.Logger = void 0;
 class Logger {
+    debugMode;
     constructor(debug = false) {
         this.debugMode = debug;
     }
