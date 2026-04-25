@@ -2373,7 +2373,7 @@ class Formatter {
             `## Consensus Process`,
             `- Consensus Achieved: **Round ${result.consensusRound}**`,
             `- Models reviewed: Reviewers \`${result.reviewerModels.join(", ")}\` + Judge \`${result.judgeModel}\``,
-            `- API Tokens Used: ${tokenCount}`,
+            `- API Tokens Used: **${tokenCount}**`,
             "",
             findingsText,
             "---",

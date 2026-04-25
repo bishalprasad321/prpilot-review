@@ -4,6 +4,11 @@
   "description": "Multi-model consensus AI-powered PR reviewer - Intelligent pull request reviews with automatic consensus from multiple AI models.",
   "author": "Bishal Prasad",
   "main": "dist/index.js",
+  "files": [
+    "dist",
+    "action.yml",
+    "README.md"
+  ],
   "scripts": {
     "clean": "node scripts/clean.js",
     "build": "npm run clean && tsc --project tsconfig.json && ncc build lib/index.js -o dist --source-map && node scripts/normalize-dist-permissions.js",
@@ -39,9 +44,10 @@
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",
-    "@types/node": "^20.11.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20.19.39",
     "@types/node-fetch": "^2.6.0",
-    "@vercel/ncc": "^0.38.4",
+    "@vercel/ncc": "latest",
     "eslint": "^9.0.0",
     "husky": "^8.0.0",
     "jest": "^30.3.0",

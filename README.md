@@ -147,9 +147,9 @@ Maximum detection power. Highest cost, most comprehensive reviews.
                  ▼
 ┌─────────────────────────────────────────────┐
 │ Round 1: Query 3 Reviewers in Parallel      │
-│ - Reviewer 1: gemini-2.5-flash             │
-│ - Reviewer 2: gemini-2.5-flash-lite        │
-│ - Reviewer 3: gemini-2.5-pro               │
+│ - Reviewer 1: gemini-2.5-flash              │
+│ - Reviewer 2: gemini-2.5-flash-lite         │
+│ - Reviewer 3: gemini-2.5-pro                │
 └────────────────┬────────────────────────────┘
                  │
           ┌──────▼──────┐

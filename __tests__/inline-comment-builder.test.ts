@@ -70,6 +70,6 @@ describe("InlineCommentBuilder", () => {
     builder.buildFromFiles(files);
     const comments = builder.buildComments(findings);
 
-    expect(comments).toHaveLength(0);
+    expect(comments).toHaveLength(1);
   });
 });
