@@ -179,14 +179,18 @@ jobs:
           echo "Outcome: ${{ steps.consensus_review.outcome }}"
           echo ""
           echo "Review Results:"
-          echo "  Decision: ${{ steps.consensus_review.outputs.review_decision }}"
-          echo "  Consensus Round: ${{ steps.consensus_review.outputs.consensus_round }}"
-          echo "  Review ID: ${{ steps.consensus_review.outputs.review_id }}"
+          echo "  Decision: ${{ steps.consensus_review.outputs.review_decision || 'N/A' }}"
+          echo "  Consensus Round: ${{ steps.consensus_review.outputs.consensus_round || 'N/A' }}"
+          echo "  Review ID: ${{ steps.consensus_review.outputs.review_id || 'N/A' }}"
           echo ""
-          if [ "${{ steps.consensus_review.outcome }}" == "success" ]; then
+          if [[ "${{ steps.consensus_review.outcome }}" == "success" ]]; then
             echo "✅ Consensus review completed successfully"
             echo "Decision: ${{ steps.consensus_review.outputs.review_decision }}"
-            echo "Reasoning: ${{ steps.consensus_review.outputs.consensus_reasoning }}"
+            echo ""
+            echo "📋 Review Details:"
+            echo "  - Consensus was reached in ${{ steps.consensus_review.outputs.consensus_round }} round(s)"
+            echo "  - Review has been posted to the pull request"
+            echo "  - Inline code comments with specific findings have been added"
           else
             echo "⚠️ Consensus review encountered an error"
             echo "This may be expected if:"
@@ -195,8 +199,6 @@ jobs:
             echo "  - API quota exceeded (check API key billing settings)"
             echo "  - Reviewer/judge models not available"
             echo "  - LLM API is temporarily unavailable"
-            echo ""
-            echo "💡 For model troubleshooting, see: MODELS_AND_OPTIMIZATION.md"
           fi
           echo "=========================================="
 

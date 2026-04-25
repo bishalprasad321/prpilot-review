@@ -265,11 +265,16 @@ ${filesInfo}
 **Code Changes:**
 ${diffPreview}
 
-CRITICAL: ONLY respond with valid JSON. Do NOT include any markdown formatting, code blocks, or prose outside the JSON.
+CRITICAL INSTRUCTIONS FOR RESPONSE FORMAT:
+- Your ENTIRE response MUST be a single valid JSON object
+- DO NOT include ANY markdown formatting, code blocks, or explanatory prose
+- DO NOT use triple backticks or any code fence markers
+- DO NOT include ANY text outside the JSON structure
+- Start your response with '{' and end with '}'
 
-Respond with EXACTLY this JSON format (all fields required):
+Respond ONLY with this exact JSON structure (all fields required, do NOT add any text before or after):
 {
-  "decision": "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
+  "decision": "APPROVE" or "REQUEST_CHANGES" or "COMMENT",
   "reasoning": "Your detailed reasoning for this decision",
   "summary": "Brief 1-2 sentence summary of the PR",
   "findings": [
@@ -277,7 +282,7 @@ Respond with EXACTLY this JSON format (all fields required):
       "file": "path/to/file.ts",
       "lineStart": 10,
       "lineEnd": 12,
-      "severity": "critical" | "warning" | "info",
+      "severity": "critical" or "warning" or "info",
       "message": "Specific code issue found",
       "suggestion": "How to fix it (optional)"
     }
@@ -285,7 +290,7 @@ Respond with EXACTLY this JSON format (all fields required):
 }
 
 INSTRUCTIONS FOR FINDINGS:
-- You MUST analyze the code and find actual issues
+- Analyze the code and find actual issues if any exist
 - Report findings for specific lines shown in the diff
 - Use exact file names and line numbers from the diff
 - Each finding MUST reference a specific changed line
@@ -298,19 +303,7 @@ Examples of good findings:
 - "Variable declared but never used"
 - "Inefficient O(n²) loop can be optimized to O(n)"
 
-Be thorough and concise. Focus on:
-1. Code quality and best practices
-2. Potential bugs or issues
-3. Performance concerns
-4. Security implications
-5. Testing coverage
-6. Code style violations
-
-Important:
-- Only report findings for files explicitly shown in the diff
-- Verify line numbers match the diff context
-- Do NOT guess or invent line numbers
-- Return valid JSON with no extra text`;
+RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
   }
 
   /**
@@ -345,11 +338,16 @@ Your task:
 2. Identify areas of agreement and disagreement
 3. Make a final consensus decision considering all perspectives
 
-CRITICAL: ONLY respond with valid JSON. Do NOT include any markdown, code blocks, or explanatory text.
+CRITICAL INSTRUCTIONS FOR RESPONSE FORMAT:
+- Your ENTIRE response MUST be a single valid JSON object
+- DO NOT include ANY markdown formatting, code blocks, or explanatory prose
+- DO NOT use triple backticks or any code fence markers
+- DO NOT include ANY text outside the JSON structure
+- Start your response with '{' and end with '}'
 
-Respond with EXACTLY this JSON format (all fields required):
+Respond ONLY with this exact JSON structure (all fields required, do NOT add any text before or after):
 {
-  "decision": "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
+  "decision": "APPROVE" or "REQUEST_CHANGES" or "COMMENT",
   "reasoning": "Your reasoning synthesizing all reviewer opinions",
   "confidence": 0.95,
   "needsRetry": false,
@@ -361,7 +359,7 @@ Decision rules:
 - "REQUEST_CHANGES": 2+ found critical issues OR unanimous REQUEST_CHANGES
 - "COMMENT": Mixed opinions with minor issues
 
-Return valid JSON only, no extra text`;
+RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
   }
 
   /**
@@ -465,8 +463,9 @@ Return valid JSON only, no extra text`;
         timestamp: new Date().toISOString(),
       };
     } catch (error) {
+      const errorDetails = error instanceof Error ? error.message : String(error);
       this.logger.warn(
-        `Reviewer '${modelName}' returned non-JSON output. Falling back to text parsing. Error details: ${error instanceof Error ? error.message : String(error)}`
+        `Reviewer '${modelName}' returned non-JSON output. Falling back to text parsing. Error details: ${errorDetails}`
       );
 
       // Extract findings from text response (don't lose findings!)
@@ -513,8 +512,9 @@ Return valid JSON only, no extra text`;
         forcedAfterMaxRounds: false,
       };
     } catch (error) {
+      const errorDetails = error instanceof Error ? error.message : String(error);
       this.logger.warn(
-        `Judge response was not valid JSON. Falling back to heuristic parsing. Error details: ${error instanceof Error ? error.message : String(error)}`
+        `Judge response was not valid JSON. Falling back to heuristic parsing. Error details: ${errorDetails}`
       );
 
       return {
@@ -737,28 +737,77 @@ Return valid JSON only, no extra text`;
 
   /**
    * Parse a JSON object from Gemini output.
+   * Handles multiple response formats:
+   * - Pure JSON
+   * - JSON wrapped in markdown code blocks
+   * - JSON embedded in text
+   * - Malformed JSON with trailing/leading text
    */
   private parseStructuredJson<T>(text: string, label: string): T {
+    if (!text || text.trim().length === 0) {
+      throw new Error(`Empty response received for ${label}`);
+    }
+
+    // Attempt 1: Direct parse
     try {
       return JSON.parse(text) as T;
     } catch {
-      const stripped = text
-        .replace(/^```json\s*/i, "")
-        .replace(/^```\s*/i, "")
-        .replace(/\s*```$/, "")
-        .trim();
+      // Continue to next attempt
+    }
 
-      try {
-        return JSON.parse(stripped) as T;
-      } catch {
-        const jsonMatch = stripped.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) {
-          throw new Error(`Could not find JSON in ${label}`);
+    // Attempt 2: Strip markdown code blocks
+    const stripped = text
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```\s*$/i, "")
+      .trim();
+
+    try {
+      return JSON.parse(stripped) as T;
+    } catch {
+      // Continue to next attempt
+    }
+
+    // Attempt 3: Extract the most promising JSON object
+    // Find all potential JSON objects and try the largest/most complete one
+    const jsonMatches = Array.from(stripped.matchAll(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g));
+    
+    if (jsonMatches.length > 0) {
+      // Try each match, prioritizing the longest (most complete)
+      const sortedMatches = jsonMatches.sort((a, b) => b[0].length - a[0].length);
+      
+      for (const match of sortedMatches) {
+        try {
+          return JSON.parse(match[0]) as T;
+        } catch {
+          // Try next match
+          continue;
         }
-
-        return JSON.parse(jsonMatch[0]) as T;
       }
     }
+
+    // Attempt 4: Last resort - try to find JSON by looking for key patterns
+    const keyPattern = /"(decision|reasoning|findings|confidence|summary)"\s*:/i;
+    const keyMatch = stripped.match(keyPattern);
+    
+    if (keyMatch) {
+      const keyStartIndex = stripped.indexOf(keyMatch[0]);
+      if (keyStartIndex >= 0) {
+        const jsonStart = Math.max(0, stripped.lastIndexOf("{", keyStartIndex));
+        const jsonEnd = stripped.length - 1;
+        
+        if (jsonStart >= 0) {
+          try {
+            return JSON.parse(stripped.substring(jsonStart, jsonEnd + 1)) as T;
+          } catch {
+            // Last attempt failed
+          }
+        }
+      }
+    }
+
+    throw new Error(
+      `Could not find valid JSON in ${label}. Response was: ${text.slice(0, 200)}${text.length > 200 ? "..." : ""}`
+    );
   }
 
   /**
@@ -859,19 +908,45 @@ Return valid JSON only, no extra text`;
 
   /**
    * Heuristic fallback when a model ignored JSON mode but still returned text.
+   * Extracts decision with higher confidence from plain text responses.
    */
   private extractDecisionFromText(text: string): ReviewDecision {
     const normalized = text.toUpperCase();
+    
+    // Strong indicators for REQUEST_CHANGES
+    const requestChangesPatterns = [
+      /\bREQUEST[S]?\s+CHANGES?\b/,
+      /\bREQUEST[S]?\s+MORE?\s+CHANGES?\b/,
+      /\bCHANGES\s+REQUESTED\b/,
+      /\breject(?:ed)?\b/,
+      /\bdo\s+not\s+approve\b/,
+      /\bcritical\s+issue/,
+      /\bsecurity\s+vulnerability/,
+      /\bdo\s+not\s+merge\b/,
+    ];
 
-    if (
-      normalized.includes("REQUEST_CHANGES") ||
-      normalized.includes("CHANGES REQUESTED")
-    ) {
-      return "REQUEST_CHANGES";
+    for (const pattern of requestChangesPatterns) {
+      if (pattern.test(normalized)) {
+        return "REQUEST_CHANGES";
+      }
     }
 
-    if (normalized.includes("APPROVE") || normalized.includes("APPROVED")) {
-      return "APPROVE";
+    // Strong indicators for APPROVE
+    const approvePatterns = [
+      /\bAPPROV(?:ED?)?\b/,
+      /\blooks\s+good\b/,
+      /\bthis\s+is\s+good\b/,
+      /\bno\s+issues\b/,
+      /\bno\s+problems\b/,
+      /\bcan\s+merge\b/,
+      /\bready\s+to\s+merge\b/,
+      /\blegit\b/,
+    ];
+
+    for (const pattern of approvePatterns) {
+      if (pattern.test(normalized)) {
+        return "APPROVE";
+      }
     }
 
     return "COMMENT";
