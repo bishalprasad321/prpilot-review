@@ -74,15 +74,11 @@ export class GitHubClient {
    */
   async getChangedFiles(prNumber: number): Promise<FileChange[]> {
     try {
-      const { data } = await this.octokit.pulls.listFiles({
-        owner: this.owner,
-        repo: this.repo,
-        pull_number: prNumber,
-        per_page: 100,
-      });
+      const data = await this.listAllFiles(prNumber);
 
       return data.map((file) => ({
         filename: file.filename,
+        previousFilename: file.previous_filename,
         status: file.status as FileChange["status"],
         additions: file.additions,
         deletions: file.deletions,
@@ -104,12 +100,7 @@ export class GitHubClient {
    */
   async getCommits(prNumber: number): Promise<CommitInfo[]> {
     try {
-      const { data } = await this.octokit.pulls.listCommits({
-        owner: this.owner,
-        repo: this.repo,
-        pull_number: prNumber,
-        per_page: 100,
-      });
+      const data = await this.listAllCommits(prNumber);
 
       return data.map((commit) => ({
         sha: commit.sha,
@@ -132,31 +123,8 @@ export class GitHubClient {
    */
   async getDiff(prNumber: number): Promise<string> {
     try {
-      const { data } = await this.octokit.pulls.get({
-        owner: this.owner,
-        repo: this.repo,
-        pull_number: prNumber,
-      });
-
-      const diff = await this.octokit.repos.compareCommits({
-        owner: this.owner,
-        repo: this.repo,
-        base: data.base.sha,
-        head: data.head.sha,
-      });
-
-      return (
-        diff.data.files
-          ?.map((file) => {
-            let diffContent = `diff --git a/${file.filename} b/${file.filename}\n`;
-            diffContent += `index ${file.sha?.slice(0, 7)}...${file.sha?.slice(0, 7)} 100644\n`;
-            diffContent += `--- a/${file.filename}\n`;
-            diffContent += `+++ b/${file.filename}\n`;
-            diffContent += file.patch || "";
-            return diffContent;
-          })
-          .join("\n") || ""
-      );
+      const files = await this.listAllFiles(prNumber);
+      return this.buildUnifiedDiff(files);
     } catch (error) {
       this.logger.error(
         `Failed to fetch diff for PR #${prNumber}: ${
@@ -202,6 +170,31 @@ export class GitHubClient {
   }
 
   /**
+   * Check whether PR Pilot already reviewed the current head commit.
+   */
+  async hasReviewForCommit(
+    prNumber: number,
+    headSha: string
+  ): Promise<boolean> {
+    try {
+      const reviews = await this.listAllReviews(prNumber);
+
+      return reviews.some(
+        (review) =>
+          review.commit_id === headSha &&
+          Boolean(review.body?.includes("Reviewed by PR Pilot Review"))
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Failed to inspect existing reviews for PR #${prNumber}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+      return false;
+    }
+  }
+
+  /**
    * Submit a PR review with inline comments and summary
    *
    * This creates a single review with:
@@ -213,7 +206,8 @@ export class GitHubClient {
     prNumber: number,
     comments: ReviewComment[],
     decision: ReviewDecision,
-    summaryBody: string
+    summaryBody: string,
+    commitSha?: string
   ): Promise<PRReviewResponse | null> {
     try {
       this.logger.debug(
@@ -231,15 +225,13 @@ export class GitHubClient {
         body: comment.body,
       }));
 
-      // Submit review
-      const { data } = await this.octokit.pulls.createReview({
-        owner: this.owner,
-        repo: this.repo,
-        pull_number: prNumber,
+      const { data } = await this.createReview(
+        prNumber,
         event,
-        body: summaryBody,
-        comments: reviewComments,
-      });
+        summaryBody,
+        reviewComments,
+        commitSha
+      );
 
       this.logger.success(
         `PR review submitted successfully (ID: ${data.id}, Decision: ${data.state})`
@@ -254,6 +246,40 @@ export class GitHubClient {
         body: data.body || "",
       };
     } catch (error) {
+      if (comments.length > 0 && this.isUnresolvableReviewCommentError(error)) {
+        this.logger.warn(
+          "Inline comments could not be resolved by GitHub. Retrying with summary-only review."
+        );
+
+        try {
+          const event = this.convertDecisionToEvent(decision);
+          const { data } = await this.createReview(
+            prNumber,
+            event,
+            `${summaryBody}\n\n> Inline comments were skipped because GitHub could not resolve at least one target line in the patch.`,
+            [],
+            commitSha
+          );
+
+          return {
+            reviewId: data.id,
+            state: this.convertEventToDecision(data.state),
+            user: {
+              login: data.user?.login || "unknown",
+            },
+            body: data.body || "",
+          };
+        } catch (retryError) {
+          this.logger.error(
+            `Failed to submit fallback summary-only review: ${
+              retryError instanceof Error
+                ? retryError.message
+                : String(retryError)
+            }`
+          );
+        }
+      }
+
       this.logger.error(
         `Failed to submit PR review: ${
           error instanceof Error ? error.message : String(error)
@@ -338,5 +364,158 @@ export class GitHubClient {
       default:
         return "COMMENT";
     }
+  }
+
+  /**
+   * List every changed file on a PR, not just the first page.
+   */
+  private async listAllFiles(prNumber: number) {
+    const files = [];
+    let page = 1;
+
+    while (true) {
+      const { data } = await this.octokit.pulls.listFiles({
+        owner: this.owner,
+        repo: this.repo,
+        pull_number: prNumber,
+        per_page: 100,
+        page,
+      });
+
+      files.push(...data);
+
+      if (data.length < 100) {
+        break;
+      }
+
+      page += 1;
+    }
+
+    return files;
+  }
+
+  /**
+   * List every commit on a PR.
+   */
+  private async listAllCommits(prNumber: number) {
+    const commits = [];
+    let page = 1;
+
+    while (true) {
+      const { data } = await this.octokit.pulls.listCommits({
+        owner: this.owner,
+        repo: this.repo,
+        pull_number: prNumber,
+        per_page: 100,
+        page,
+      });
+
+      commits.push(...data);
+
+      if (data.length < 100) {
+        break;
+      }
+
+      page += 1;
+    }
+
+    return commits;
+  }
+
+  /**
+   * List every review on a PR.
+   */
+  private async listAllReviews(prNumber: number) {
+    const reviews = [];
+    let page = 1;
+
+    while (true) {
+      const { data } = await this.octokit.pulls.listReviews({
+        owner: this.owner,
+        repo: this.repo,
+        pull_number: prNumber,
+        per_page: 100,
+        page,
+      });
+
+      reviews.push(...data);
+
+      if (data.length < 100) {
+        break;
+      }
+
+      page += 1;
+    }
+
+    return reviews;
+  }
+
+  /**
+   * Build a synthetic unified diff from the PR file list patches.
+   */
+  private buildUnifiedDiff(
+    files: Array<{
+      filename: string;
+      previous_filename?: string;
+      patch?: string;
+      status?: string;
+    }>
+  ): string {
+    return files
+      .filter((file) => Boolean(file.patch))
+      .map((file) => {
+        const oldPath =
+          file.status === "renamed"
+            ? file.previous_filename || file.filename
+            : file.filename;
+        const fromPath = file.status === "added" ? "/dev/null" : `a/${oldPath}`;
+        const toPath =
+          file.status === "removed" ? "/dev/null" : `b/${file.filename}`;
+
+        return [
+          `diff --git ${fromPath} ${toPath}`,
+          `--- ${fromPath}`,
+          `+++ ${toPath}`,
+          file.patch || "",
+        ].join("\n");
+      })
+      .join("\n");
+  }
+
+  /**
+   * Create a review against the current PR head.
+   */
+  private async createReview(
+    prNumber: number,
+    event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
+    body: string,
+    comments: Array<{
+      path: string;
+      line: number;
+      side: "RIGHT";
+      body: string;
+    }>,
+    commitSha?: string
+  ) {
+    return this.octokit.pulls.createReview({
+      owner: this.owner,
+      repo: this.repo,
+      pull_number: prNumber,
+      commit_id: commitSha,
+      event,
+      body,
+      comments,
+    });
+  }
+
+  /**
+   * Detect GitHub's unresolved-line validation error for inline review comments.
+   */
+  private isUnresolvableReviewCommentError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return (
+      message.includes("Unprocessable Entity") &&
+      message.includes("Line could not be resolved")
+    );
   }
 }

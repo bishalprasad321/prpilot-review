@@ -25,6 +25,7 @@ import { DiffProcessor } from "./diff/diff-processor.js";
 import { StateManager } from "./state/state-manager.js";
 import { ReviewOrchestrator } from "./review/review-orchestrator.js";
 import { InlineCommentBuilder } from "./review/inline-comment-builder.js";
+import { Formatter } from "./utils/formatter.js";
 import { ActionConfig, LLMContext, ReviewComment } from "./utils/types.js";
 
 interface GitHubEventPayload {
@@ -35,6 +36,23 @@ interface GitHubEventPayload {
 }
 
 const logger = new Logger();
+const DEFAULT_REVIEWER_MODELS = [
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-pro",
+];
+const DEFAULT_JUDGE_MODEL = "gemini-2.5-pro";
+
+function normalizeReviewDecision(
+  decision: "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
+  findingsCount: number
+): "APPROVE" | "REQUEST_CHANGES" | "COMMENT" {
+  if (findingsCount > 0) {
+    return "REQUEST_CHANGES";
+  }
+
+  return decision;
+}
 
 async function main() {
   const startTime = Date.now();
@@ -50,12 +68,11 @@ async function main() {
       githubToken: core.getInput("github_token"),
       geminiApiKey: core.getInput("gemini_api_key"),
       reviewerModels: (
-        core.getInput("reviewer_models") ||
-        "gemini-2.0-flash,gemini-1.5-flash,gemini-1.5-pro"
+        core.getInput("reviewer_models") || DEFAULT_REVIEWER_MODELS.join(",")
       )
         .split(",")
         .map((m) => m.trim()),
-      judgeModel: core.getInput("judge_model") || "gemini-2.0-flash-thinking",
+      judgeModel: core.getInput("judge_model") || DEFAULT_JUDGE_MODEL,
       maxConsensusRounds: parseInt(core.getInput("max_consensus_rounds")) || 3,
       inlineCommentsEnabled:
         core.getInput("inline_comments_enabled") !== "false",
@@ -162,7 +179,15 @@ async function main() {
     // =========================================================================
     logger.step(5, "Checking state (idempotency)");
 
-    if (stateManager.isAlreadyReviewed(prMetadata.head.sha)) {
+    const alreadyReviewedLocally = stateManager.isAlreadyReviewed(
+      prMetadata.head.sha
+    );
+    const alreadyReviewedOnGitHub = await gitHub.hasReviewForCommit(
+      prNumber,
+      prMetadata.head.sha
+    );
+
+    if (alreadyReviewedLocally || alreadyReviewedOnGitHub) {
       logger.warn(
         `⚠️ This commit (${prMetadata.head.sha.slice(0, 7)}) was already reviewed`
       );
@@ -255,15 +280,24 @@ async function main() {
 
     const inlineComments: ReviewComment[] = [];
 
-    if (
-      config.inlineCommentsEnabled &&
-      reviewResult.inlineFindings.length > 0
-    ) {
-      const commentBuilder = new InlineCommentBuilder(config.debug);
-      commentBuilder.buildFromDiff(files, diffContent);
-      inlineComments.push(
-        ...commentBuilder.buildComments(reviewResult.inlineFindings)
-      );
+    const commentBuilder = new InlineCommentBuilder(config.debug);
+    commentBuilder.buildFromFiles(files);
+
+    const validFindings = commentBuilder.filterCommentableFindings(
+      reviewResult.inlineFindings
+    );
+
+    reviewResult.inlineFindings = validFindings;
+    reviewResult.finalDecision = normalizeReviewDecision(
+      reviewResult.finalDecision,
+      validFindings.length
+    );
+    reviewResult.summaryComment = new Formatter().formatReviewComment(
+      reviewResult
+    );
+
+    if (config.inlineCommentsEnabled && validFindings.length > 0) {
+      inlineComments.push(...commentBuilder.buildComments(validFindings));
     }
 
     logger.success("✓ Inline comments built");
@@ -278,7 +312,8 @@ async function main() {
       prNumber,
       inlineComments,
       reviewResult.finalDecision,
-      reviewResult.summaryComment
+      reviewResult.summaryComment,
+      prMetadata.head.sha
     );
 
     if (!reviewResponse) {
@@ -342,6 +377,7 @@ async function main() {
 
 // Run main
 main().catch((error) => {
+  // eslint-disable-next-line no-console
   console.error("Uncaught error:", error);
   process.exit(1);
 });
