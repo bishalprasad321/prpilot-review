@@ -435,19 +435,7 @@ class GitHubClient {
      * Convert ReviewDecision to GitHub review event
      */
     convertDecisionToEvent(decision) {
-        // GitHub Actions cannot approve pull requests (security policy)
-        // Map APPROVE → COMMENT when running in GitHub Actions
-        if (decision === "APPROVE" && this.isGitHubActionsEnvironment()) {
-            this.logger.warn("⚠️ GitHub Actions cannot approve PRs (security policy). Converting APPROVE → COMMENT.");
-            return "COMMENT";
-        }
         return decision;
-    }
-    /**
-     * Check if running in GitHub Actions environment
-     */
-    isGitHubActionsEnvironment() {
-        return process.env.GITHUB_ACTIONS === "true";
     }
     /**
      * Convert GitHub review state to ReviewDecision
@@ -653,6 +641,12 @@ const DEFAULT_REVIEWER_MODELS = [
     "gemini-2.5-pro",
 ];
 const DEFAULT_JUDGE_MODEL = "gemini-2.5-pro";
+function normalizeReviewDecision(decision, findingsCount) {
+    if (findingsCount > 0) {
+        return "REQUEST_CHANGES";
+    }
+    return decision;
+}
 async function main() {
     const startTime = Date.now();
     logger.section("🚀 PR Pilot Review - Starting");
@@ -807,17 +801,14 @@ async function main() {
         // =========================================================================
         logger.step(10, "Building inline comments");
         const inlineComments = [];
-        if (reviewResult.inlineFindings.length > 0) {
-            const commentBuilder = new inline_comment_builder_js_1.InlineCommentBuilder(config.debug);
-            commentBuilder.buildFromFiles(files);
-            const validFindings = commentBuilder.filterCommentableFindings(reviewResult.inlineFindings);
-            if (validFindings.length !== reviewResult.inlineFindings.length) {
-                reviewResult.inlineFindings = validFindings;
-                reviewResult.summaryComment = new formatter_js_1.Formatter().formatReviewComment(reviewResult);
-            }
-            if (config.inlineCommentsEnabled) {
-                inlineComments.push(...commentBuilder.buildComments(validFindings));
-            }
+        const commentBuilder = new inline_comment_builder_js_1.InlineCommentBuilder(config.debug);
+        commentBuilder.buildFromFiles(files);
+        const validFindings = commentBuilder.filterCommentableFindings(reviewResult.inlineFindings);
+        reviewResult.inlineFindings = validFindings;
+        reviewResult.finalDecision = normalizeReviewDecision(reviewResult.finalDecision, validFindings.length);
+        reviewResult.summaryComment = new formatter_js_1.Formatter().formatReviewComment(reviewResult);
+        if (config.inlineCommentsEnabled && validFindings.length > 0) {
+            inlineComments.push(...commentBuilder.buildComments(validFindings));
         }
         logger.success("✓ Inline comments built");
         logger.info(`  - Comments: ${inlineComments.length}`);
@@ -935,10 +926,23 @@ class LLMClient {
         this.baseUrl = "https://generativelanguage.googleapis.com/v1beta/models";
         this.availableGenerateContentModels = null;
         this.resolvedModelCache = new Map();
+        this.totalTokens = { prompt: 0, completion: 0, total: 0 };
         this.apiKey = apiKey;
         this.logger = new logger_js_1.Logger(options.debug);
         this.maxRetries = options.maxRetries || 3;
         this.retryDelayMs = options.retryDelayMs || 1000;
+    }
+    /**
+     * Get total tokens used across all API calls in this session
+     */
+    getTokensUsed() {
+        return { ...this.totalTokens };
+    }
+    /**
+     * Reset token counter (useful for new reviews)
+     */
+    resetTokenCounter() {
+        this.totalTokens = { prompt: 0, completion: 0, total: 0 };
     }
     /**
      * Call a reviewer model independently
@@ -1160,7 +1164,20 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
                 const errorData = (await response.json());
                 throw new GeminiApiError(response.status, `Gemini API error: ${response.status} - ${errorData.error?.message || "Unknown error"}`);
             }
-            return (await response.json());
+            const data = (await response.json());
+            // Track token usage from response metadata
+            if (data.usageMetadata) {
+                if (data.usageMetadata.promptTokenCount) {
+                    this.totalTokens.prompt += data.usageMetadata.promptTokenCount;
+                }
+                if (data.usageMetadata.candidatesTokenCount) {
+                    this.totalTokens.completion += data.usageMetadata.candidatesTokenCount;
+                }
+                if (data.usageMetadata.totalTokenCount) {
+                    this.totalTokens.total += data.usageMetadata.totalTokenCount;
+                }
+            }
+            return data;
         }
         catch (error) {
             if (attempt < this.maxRetries && this.isRetryableError(error)) {
@@ -1909,6 +1926,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.ReviewOrchestrator = void 0;
 const logger_js_1 = __nccwpck_require__(8532);
 const llm_client_js_1 = __nccwpck_require__(6147);
+const formatter_js_1 = __nccwpck_require__(9232);
 class ReviewOrchestrator {
     constructor(apiKey, options) {
         this.llmClient = new llm_client_js_1.LLMClient(apiKey, { debug: options.debug });
@@ -1916,6 +1934,7 @@ class ReviewOrchestrator {
         this.reviewerModels = options.reviewerModels;
         this.judgeModel = options.judgeModel;
         this.maxConsensusRounds = options.maxConsensusRounds;
+        this.formatter = new formatter_js_1.Formatter();
         if (this.reviewerModels.length !== 3) {
             throw new Error("Exactly 3 reviewer models are required");
         }
@@ -1991,17 +2010,35 @@ class ReviewOrchestrator {
         }
         // Step 4: Consolidate findings
         const inlineFindings = this.consolidateFindings(allOpinions);
+        finalDecision = this.normalizeReviewDecision(finalDecision, inlineFindings);
         const executionTime = Date.now() - startTime;
+        // Collect token usage data
+        const tokensUsed = this.llmClient.getTokensUsed();
         // Build result
         const result = {
             finalDecision,
             consensusReasoning: finalReasoning,
             consensusRound,
             totalRounds: consensusRound,
+            reviewerModels: [...this.reviewerModels],
+            judgeModel: this.judgeModel,
             inlineFindings,
-            summaryComment: this.buildSummaryComment(finalDecision, finalReasoning, inlineFindings, consensusRound),
+            summaryComment: this.formatter.formatReviewComment({
+                finalDecision,
+                consensusReasoning: finalReasoning,
+                consensusRound,
+                totalRounds: consensusRound,
+                reviewerModels: [...this.reviewerModels],
+                judgeModel: this.judgeModel,
+                inlineFindings,
+                summaryComment: "",
+                allOpinions,
+                timestamp: new Date().toISOString(),
+                tokensUsed,
+            }),
             allOpinions,
             timestamp: new Date().toISOString(),
+            tokensUsed,
         };
         this.logger.info("=".repeat(70));
         this.logger.success(`✅ Consensus Review Complete (${executionTime}ms, ${consensusRound} rounds)`);
@@ -2098,100 +2135,11 @@ ${reasons}`;
             return a.lineStart - b.lineStart;
         });
     }
-    /**
-     * Build summary comment for PR
-     */
-    buildSummaryComment(decision, reasoning, findings, roundNumber) {
-        const decisionEmoji = this.getDecisionEmoji(decision);
-        const decisionText = this.formatDecision(decision);
-        let comment = `## ${decisionEmoji} Multi-Model Consensus Review: ${decisionText}\n\n`;
-        comment += `### Consensus Process\n`;
-        comment += `- Consensus achieved in **Round ${roundNumber}**\n`;
-        comment += `- Models reviewed: 3 independent reviewers + 1 judge\n`;
-        comment += `- Code findings: ${findings.length} issue(s)\n\n`;
-        comment += `### Judge Reasoning\n${reasoning}\n\n`;
+    normalizeReviewDecision(decision, findings) {
         if (findings.length > 0) {
-            comment += `### Code Issues Found\n`;
-            const bySeverity = this.groupBySeverity(findings);
-            if (bySeverity.critical.length > 0) {
-                comment += `\n🔴 **Critical Issues** (${bySeverity.critical.length})\n`;
-                for (const finding of bySeverity.critical) {
-                    comment += this.formatFinding(finding);
-                }
-            }
-            if (bySeverity.warning.length > 0) {
-                comment += `\n🟡 **Warnings** (${bySeverity.warning.length})\n`;
-                for (const finding of bySeverity.warning) {
-                    comment += this.formatFinding(finding);
-                }
-            }
-            if (bySeverity.info.length > 0) {
-                comment += `\n🔵 **Info** (${bySeverity.info.length})\n`;
-                for (const finding of bySeverity.info) {
-                    comment += this.formatFinding(finding);
-                }
-            }
+            return "REQUEST_CHANGES";
         }
-        else {
-            comment += `### ✅ No Issues Found\n`;
-            comment += `All reviewers agree this code looks good!\n`;
-        }
-        comment += `\n---\n`;
-        comment += `*Reviewed by PR Pilot Review - AI-powered Multi-Model Consensus Review System*\n`;
-        return comment;
-    }
-    /**
-     * Group findings by severity
-     */
-    groupBySeverity(findings) {
-        return {
-            critical: findings.filter((f) => f.severity === "critical"),
-            warning: findings.filter((f) => f.severity === "warning"),
-            info: findings.filter((f) => f.severity === "info"),
-        };
-    }
-    /**
-     * Format a single finding for display
-     */
-    formatFinding(finding) {
-        const lineInfo = finding.lineEnd && finding.lineEnd !== finding.lineStart
-            ? `Lines ${finding.lineStart}-${finding.lineEnd}`
-            : `Line ${finding.lineStart}`;
-        let text = `- **${finding.file}** (${lineInfo}): ${finding.message}\n`;
-        if (finding.suggestion) {
-            text += `  > 💡 Suggestion: ${finding.suggestion}\n`;
-        }
-        return text;
-    }
-    /**
-     * Get emoji for decision
-     */
-    getDecisionEmoji(decision) {
-        switch (decision) {
-            case "APPROVE":
-                return "✅";
-            case "REQUEST_CHANGES":
-                return "❌";
-            case "COMMENT":
-                return "💬";
-            default:
-                return "❓";
-        }
-    }
-    /**
-     * Format decision text
-     */
-    formatDecision(decision) {
-        switch (decision) {
-            case "APPROVE":
-                return "Approved";
-            case "REQUEST_CHANGES":
-                return "Changes Requested";
-            case "COMMENT":
-                return "Comment";
-            default:
-                return "Unknown";
-        }
+        return decision;
     }
 }
 exports.ReviewOrchestrator = ReviewOrchestrator;
@@ -2412,20 +2360,25 @@ class Formatter {
      * Format review result as PR comment
      */
     formatReviewComment(result) {
-        const decisionEmoji = this.getDecisionEmoji(result.finalDecision);
         const decisionText = this.formatDecision(result.finalDecision);
-        let comment = `## ${decisionEmoji} PR Review - ${decisionText}\n\n`;
-        comment += `**Consensus reached in round ${result.consensusRound} of ${result.totalRounds}**\n\n`;
-        comment += `### Judge Reasoning\n${result.consensusReasoning}\n\n`;
-        if (result.inlineFindings.length > 0) {
-            comment += `### Code Findings\n`;
-            comment += this.formatFindings(result.inlineFindings);
-            comment += "\n";
-        }
-        comment += `---\n`;
-        comment += `*Reviewed by PR Pilot Review - Multi-Model Consensus AI Review*\n`;
-        comment += `📅 ${new Date(result.timestamp).toLocaleString()}\n`;
-        return comment;
+        const tokenCount = result.tokensUsed?.total ?? 0;
+        const findingsText = result.inlineFindings.length === 0
+            ? "No issues found."
+            : result.inlineFindings.length === 1
+                ? "1 issue found."
+                : `${result.inlineFindings.length} issues found.`;
+        return [
+            `# Multi-Model Consensus Review: ${decisionText}`,
+            `## Consensus Process`,
+            `- Consensus Achieved: Round ${result.consensusRound}`,
+            `- Models reviewed: Reviewer [${result.reviewerModels.join(", ")}] + Judge [${result.judgeModel}]`,
+            `- Tokens Used: ${tokenCount}`,
+            "",
+            findingsText,
+            "---",
+            "Reviewed by PR Pilot Review - AI-powered Multi-Model Consensus Review System",
+            "---",
+        ].join("\n");
     }
     /**
      * Group findings by file
@@ -2438,7 +2391,6 @@ class Formatter {
             }
             grouped[finding.file].push(finding);
         }
-        // Sort findings within each file by line number
         for (const file of Object.keys(grouped)) {
             grouped[file].sort((a, b) => a.lineStart - b.lineStart);
         }
@@ -2460,21 +2412,6 @@ class Formatter {
         }
     }
     /**
-     * Get emoji for decision
-     */
-    getDecisionEmoji(decision) {
-        switch (decision) {
-            case "APPROVE":
-                return "✅";
-            case "REQUEST_CHANGES":
-                return "❌";
-            case "COMMENT":
-                return "💬";
-            default:
-                return "❓";
-        }
-    }
-    /**
      * Format decision text
      */
     formatDecision(decision) {
@@ -2482,9 +2419,9 @@ class Formatter {
             case "APPROVE":
                 return "Approved";
             case "REQUEST_CHANGES":
-                return "Changes Requested";
+                return "Request Changes";
             case "COMMENT":
-                return "Comment";
+                return "Comments on Improvement";
             default:
                 return "Unknown";
         }

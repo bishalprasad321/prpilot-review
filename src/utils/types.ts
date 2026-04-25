@@ -136,10 +136,17 @@ export interface ReviewResult {
   consensusReasoning: string;
   consensusRound: number;
   totalRounds: number;
+  reviewerModels: string[];
+  judgeModel: string;
   inlineFindings: CodeFinding[];
   summaryComment: string;
   allOpinions: ReviewerOpinion[];
   timestamp: string;
+  tokensUsed?: {
+    prompt: number;
+    completion: number;
+    total: number;
+  };
 }
 
 // ============================================================================

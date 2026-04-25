@@ -100,12 +100,27 @@ export class LLMClient {
   private baseUrl = "https://generativelanguage.googleapis.com/v1beta/models";
   private availableGenerateContentModels: Set<string> | null = null;
   private resolvedModelCache = new Map<string, string>();
+  private totalTokens = { prompt: 0, completion: 0, total: 0 };
 
   constructor(apiKey: string, options: LLMClientOptions = {}) {
     this.apiKey = apiKey;
     this.logger = new Logger(options.debug);
     this.maxRetries = options.maxRetries || 3;
     this.retryDelayMs = options.retryDelayMs || 1000;
+  }
+
+  /**
+   * Get total tokens used across all API calls in this session
+   */
+  getTokensUsed(): { prompt: number; completion: number; total: number } {
+    return { ...this.totalTokens };
+  }
+
+  /**
+   * Reset token counter (useful for new reviews)
+   */
+  resetTokenCounter(): void {
+    this.totalTokens = { prompt: 0, completion: 0, total: 0 };
   }
 
   /**
@@ -411,7 +426,23 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
         );
       }
 
-      return (await response.json()) as GeminiResponse;
+      const data = (await response.json()) as GeminiResponse;
+
+      // Track token usage from response metadata
+      if (data.usageMetadata) {
+        if (data.usageMetadata.promptTokenCount) {
+          this.totalTokens.prompt += data.usageMetadata.promptTokenCount;
+        }
+        if (data.usageMetadata.candidatesTokenCount) {
+          this.totalTokens.completion +=
+            data.usageMetadata.candidatesTokenCount;
+        }
+        if (data.usageMetadata.totalTokenCount) {
+          this.totalTokens.total += data.usageMetadata.totalTokenCount;
+        }
+      }
+
+      return data;
     } catch (error) {
       if (attempt < this.maxRetries && this.isRetryableError(error)) {
         this.logger.warn(
@@ -463,7 +494,8 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
         timestamp: new Date().toISOString(),
       };
     } catch (error) {
-      const errorDetails = error instanceof Error ? error.message : String(error);
+      const errorDetails =
+        error instanceof Error ? error.message : String(error);
       this.logger.warn(
         `Reviewer '${modelName}' returned non-JSON output. Falling back to text parsing. Error details: ${errorDetails}`
       );
@@ -512,7 +544,8 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
         forcedAfterMaxRounds: false,
       };
     } catch (error) {
-      const errorDetails = error instanceof Error ? error.message : String(error);
+      const errorDetails =
+        error instanceof Error ? error.message : String(error);
       this.logger.warn(
         `Judge response was not valid JSON. Falling back to heuristic parsing. Error details: ${errorDetails}`
       );
@@ -769,12 +802,16 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
 
     // Attempt 3: Extract the most promising JSON object
     // Find all potential JSON objects and try the largest/most complete one
-    const jsonMatches = Array.from(stripped.matchAll(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g));
-    
+    const jsonMatches = Array.from(
+      stripped.matchAll(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g)
+    );
+
     if (jsonMatches.length > 0) {
       // Try each match, prioritizing the longest (most complete)
-      const sortedMatches = jsonMatches.sort((a, b) => b[0].length - a[0].length);
-      
+      const sortedMatches = jsonMatches.sort(
+        (a, b) => b[0].length - a[0].length
+      );
+
       for (const match of sortedMatches) {
         try {
           return JSON.parse(match[0]) as T;
@@ -786,15 +823,16 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
     }
 
     // Attempt 4: Last resort - try to find JSON by looking for key patterns
-    const keyPattern = /"(decision|reasoning|findings|confidence|summary)"\s*:/i;
+    const keyPattern =
+      /"(decision|reasoning|findings|confidence|summary)"\s*:/i;
     const keyMatch = stripped.match(keyPattern);
-    
+
     if (keyMatch) {
       const keyStartIndex = stripped.indexOf(keyMatch[0]);
       if (keyStartIndex >= 0) {
         const jsonStart = Math.max(0, stripped.lastIndexOf("{", keyStartIndex));
         const jsonEnd = stripped.length - 1;
-        
+
         if (jsonStart >= 0) {
           try {
             return JSON.parse(stripped.substring(jsonStart, jsonEnd + 1)) as T;
@@ -912,7 +950,7 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
    */
   private extractDecisionFromText(text: string): ReviewDecision {
     const normalized = text.toUpperCase();
-    
+
     // Strong indicators for REQUEST_CHANGES
     const requestChangesPatterns = [
       /\bREQUEST[S]?\s+CHANGES?\b/,
@@ -956,9 +994,7 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
    * Extract findings from text when JSON parsing fails.
    * Looks for patterns like "file.ts:line" or common issue descriptions.
    */
-  private extractFindingsFromText(
-    text: string
-  ): Array<{
+  private extractFindingsFromText(text: string): Array<{
     file: string;
     lineStart: number;
     lineEnd?: number;

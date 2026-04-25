@@ -43,6 +43,17 @@ const DEFAULT_REVIEWER_MODELS = [
 ];
 const DEFAULT_JUDGE_MODEL = "gemini-2.5-pro";
 
+function normalizeReviewDecision(
+  decision: "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
+  findingsCount: number
+): "APPROVE" | "REQUEST_CHANGES" | "COMMENT" {
+  if (findingsCount > 0) {
+    return "REQUEST_CHANGES";
+  }
+
+  return decision;
+}
+
 async function main() {
   const startTime = Date.now();
   logger.section("🚀 PR Pilot Review - Starting");
@@ -269,23 +280,24 @@ async function main() {
 
     const inlineComments: ReviewComment[] = [];
 
-    if (reviewResult.inlineFindings.length > 0) {
-      const commentBuilder = new InlineCommentBuilder(config.debug);
-      commentBuilder.buildFromFiles(files);
-      const validFindings = commentBuilder.filterCommentableFindings(
-        reviewResult.inlineFindings
-      );
+    const commentBuilder = new InlineCommentBuilder(config.debug);
+    commentBuilder.buildFromFiles(files);
 
-      if (validFindings.length !== reviewResult.inlineFindings.length) {
-        reviewResult.inlineFindings = validFindings;
-        reviewResult.summaryComment = new Formatter().formatReviewComment(
-          reviewResult
-        );
-      }
+    const validFindings = commentBuilder.filterCommentableFindings(
+      reviewResult.inlineFindings
+    );
 
-      if (config.inlineCommentsEnabled) {
-        inlineComments.push(...commentBuilder.buildComments(validFindings));
-      }
+    reviewResult.inlineFindings = validFindings;
+    reviewResult.finalDecision = normalizeReviewDecision(
+      reviewResult.finalDecision,
+      validFindings.length
+    );
+    reviewResult.summaryComment = new Formatter().formatReviewComment(
+      reviewResult
+    );
+
+    if (config.inlineCommentsEnabled && validFindings.length > 0) {
+      inlineComments.push(...commentBuilder.buildComments(validFindings));
     }
 
     logger.success("✓ Inline comments built");
