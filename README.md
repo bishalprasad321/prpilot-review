@@ -1,13 +1,13 @@
 # PR Pilot Review
 
-> **Intelligent Multi-Model Consensus AI PR Reviewer** — Automated code reviews with consensus from multiple Gemini AI models.
+> **Intelligent Multi-Model Consensus AI PR Reviewer** — Automated code reviews with consensus from configurable LLM providers like Gemini and Groq.
 
 [![Build Status](https://github.com/bishalprasad321/prpilot-review/actions/workflows/ci.yml/badge.svg)](https://github.com/bishalprasad321/prpilot-review/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Overview
 
-PR Pilot Review is a GitHub Action that performs intelligent, consensus-based code reviews on pull requests using Google's Gemini AI models. Unlike single-model reviewers, it runs **3 independent AI reviewers in parallel** and uses a **judge model to reach consensus**, ensuring more thorough and balanced code quality feedback.
+PR Pilot Review is a GitHub Action that performs intelligent, consensus-based code reviews on pull requests using configurable LLM providers such as Gemini or Groq. Unlike single-model reviewers, it runs **3 independent AI reviewers in parallel** and uses a **judge model to reach consensus**, ensuring more thorough and balanced code quality feedback.
 
 ### Key Features
 
@@ -22,18 +22,16 @@ PR Pilot Review is a GitHub Action that performs intelligent, consensus-based co
 
 ## Quick Start
 
-### 1. Get a Gemini API Key
+### 1. Choose your LLM provider
 
-1. Visit [Google AI Studio](https://makersuite.google.com/app/apikey)
-2. Click "Create API Key"
-3. Copy the key
+This action supports multiple providers today, including `gemini` and `groq`.
 
-### 2. Add to GitHub Secrets
+### 2. Add the API key to GitHub Secrets
 
 Go to your repository:
 
 - **Settings** → **Secrets and variables** → **Actions**
-- Add secret: `GEMINI_API_KEY` (paste your key)
+- Add a provider-specific secret, e.g. `GROQ_API_KEY`
 
 ### 3. Use the Action
 
@@ -61,7 +59,8 @@ jobs:
       - uses: bishalprasad321/prpilot-review@v1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          llm_provider: groq
+          llm_api_key: ${{ secrets.GROQ_API_KEY }}
           # Optional: customize model configuration
           # reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-pro"
           # judge_model: "gemini-2.5-pro"
@@ -79,7 +78,8 @@ All inputs are optional (sensible defaults provided):
 with:
   # Required
   github_token: ${{ secrets.GITHUB_TOKEN }}
-  gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+  llm_provider: groq
+  llm_api_key: ${{ secrets.GROQ_API_KEY }}
 
   # Optional: Model Configuration
   reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-pro" # 3 models
@@ -93,47 +93,51 @@ with:
   debug: "false" # Verbose logging
 ```
 
-Use stable Gemini `v1beta` model codes. If you still pass legacy aliases such as `gemini-3.0-flash` or `gemini-3.1-pro`, the action will try to remap them to supported 2.x models before calling the API.
+Use stable provider-specific model IDs. For Gemini, use `v1beta` model codes. For Groq, use free-tier model IDs such as `groq-1.5-mini` or `groq-1.5-small`.
+
+### Groq Example
+
+```yaml
+with:
+  github_token: ${{ secrets.GITHUB_TOKEN }}
+  llm_provider: groq
+  llm_api_key: ${{ secrets.GROQ_API_KEY }}
+  reviewer_models: "llama-3.1-8b-instant,openai/gpt-oss-20b,llama-3.3-70b-versatile"
+  judge_model: "openai/gpt-oss-120b"
+  max_consensus_rounds: "3"
+  inline_comments_enabled: "true"
+```
 
 ### Model Presets
 
 Choose models based on your needs:
 
-#### Default (Recommended) ✅
+#### Groq Default Production ✅
 
 ```yaml
-reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-pro"
-judge_model: "gemini-2.5-pro"
+reviewer_models: "llama-3.1-8b-instant,openai/gpt-oss-20b,llama-3.3-70b-versatile"
+judge_model: "openai/gpt-oss-120b"
 ```
 
-Best balance of speed, quality, and cost.
+Best balance of production reliability and coverage.
 
-#### High Capability (Best Quality)
+#### Groq Maximum Speed ✅
 
 ```yaml
-reviewer_models: "gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite"
-judge_model: "gemini-2.5-pro"
+reviewer_models: "llama-3.1-8b-instant,openai/gpt-oss-20b,openai/gpt-oss-20b"
+judge_model: "openai/gpt-oss-120b"
 ```
 
-Uses most capable models. Higher cost but best findings.
+Optimized for faster review cycles with lighter reviewer models.
 
-#### Cost Optimized (Lowest Cost)
+#### Groq Maximum Quality ✅
 
 ```yaml
-reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-flash-lite"
-judge_model: "gemini-2.5-flash"
+reviewer_models: "llama-3.3-70b-versatile,openai/gpt-oss-120b,openai/gpt-oss-20b"
+judge_model: "openai/gpt-oss-120b"
 ```
 
-Uses lighter models. Lower cost but lighter analysis.
-
-#### Quality Optimized (Most Findings)
-
-```yaml
-reviewer_models: "gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite"
-judge_model: "gemini-2.5-pro"
-```
-
-Maximum detection power. Highest cost, most comprehensive reviews.
+Highest quality review configuration for the deepest analysis.
 
 ## How It Works
 
@@ -194,7 +198,7 @@ The action posts a GitHub review with:
 See detailed architecture in [docs/adr/](./docs/adr/):
 
 - **ADR-001** — Multi-Model Consensus Architecture
-- **ADR-002** — Gemini API Integration & Model Selection
+- **ADR-002** — LLM Provider Integration & Model Selection
 - **ADR-003** — Inline Comment Mapping
 - **ADR-004** — Idempotency & State Management
 
@@ -205,7 +209,7 @@ prpilot-review/
 ├── src/
 │   ├── index.ts                 # Main orchestrator (13-step pipeline)
 │   ├── llm/
-│   │   └── llm-client.ts       # Gemini API abstraction
+│   │   └── llm-client.ts       # LLM provider abstraction
 │   ├── review/
 │   │   ├── review-orchestrator.ts  # Consensus logic
 │   │   └── inline-comment-builder.ts   # Line mapping
@@ -285,12 +289,11 @@ npm run all          # Run all checks
 
 ## API Keys & Billing
 
-### Getting a Gemini API Key
+### Getting an API Key
 
-1. Go to [Google AI Studio](https://makersuite.google.com/app/apikey)
-2. Click "Create API Key"
-3. Select/create a project
-4. Copy the key and add to GitHub repo secrets
+1. Choose your provider: `gemini` or `groq`
+2. Create an API key in the provider console
+3. Copy the key and add it to GitHub repo secrets
 
 ### Free Tier Quotas
 
@@ -302,48 +305,48 @@ The free tier has limits:
 If you hit quota errors:
 
 1. **Upgrade to paid plan** — Recommended for production
-2. **Use lighter models** — `gemini-2.5-flash-lite` uses fewer tokens
+2. **Use lighter models** — `gemini-2.5-flash-lite` or `groq-1.5-mini` use fewer tokens
 3. **Reduce reviewer count** — Use 2 instead of 3 reviewers
 4. **Schedule reviews** — Spread runs across off-peak hours
 
-See [quota documentation](https://ai.google.dev/gemini-api/docs/rate-limits).
+See provider-specific quota documentation for your chosen LLM.
 
 ### Costs
 
-Typical cost per PR review:
+Typical cost per PR review will vary by provider and model selection:
 
-- **Default config** — $0.001-0.005 per review (3 reviewers + optional judge)
-- **Cost-optimized** — $0.0005-0.002 per review
-- **Quality-optimized** — $0.005-0.02 per review
+- **Default config** — Low-cost balanced review
+- **Cost-optimized** — Minimal token usage and fastest reviewers
+- **Quality-optimized** — More comprehensive analysis with higher cost
 
-Pricing based on [Gemini API rates](https://ai.google.dev/pricing).
+Pricing is provider-dependent. For Gemini, see [Gemini pricing](https://ai.google.dev/pricing).
 
 ## Troubleshooting
 
 ### Action not running?
 
-- Check `GEMINI_API_KEY` is set in repo secrets
+- Check `llm_provider` and `llm_api_key` are configured correctly
 - Verify branch triggers (pull_request, branches)
 - Check action logs for errors
 
 ### Zero findings even with code changes?
 
 - Enable debug mode to see full model responses
-- Check if models are available in v1beta API
-- Try different model preset
-- Verify PR has actual code changes
+- Check whether the selected models are valid for your provider
+- Try a different model preset
+- Verify the PR has actual code changes
 
 ### Quota exceeded errors?
 
-- Check your billing plan at [Google Cloud Console](https://console.cloud.google.com)
-- Switch to paid plan or upgrade quota
-- Use lighter models (flash-lite variants)
+- Check your provider billing or free tier quota
+- Switch to paid plan or upgrade quota if available
+- Use lighter models where supported
 
 ### Model not found errors?
 
-- Verify model names match available list
-- Models must be in `v1beta` API
-- Check [available models](https://ai.google.dev/gemini-api/docs/models/gemini)
+- Verify model names match your provider's available models
+- For Gemini, check [Gemini models](https://ai.google.dev/gemini-api/docs/models/gemini)
+- For Groq, check your Groq account model docs
 
 ### Slow reviews?
 
@@ -439,7 +442,7 @@ MIT License — See [LICENSE](./LICENSE) file
 
 ## Acknowledgments
 
-- Built with [Gemini AI API](https://ai.google.dev/)
+- Built with configurable LLM providers such as Gemini or Groq
 - GitHub Actions integration via [@actions/core](https://github.com/actions/toolkit)
 - Code bundling via [@vercel/ncc](https://github.com/vercel/ncc)
 

@@ -14,6 +14,7 @@ import { LLMClient } from "../llm/llm-client.js";
 import { Formatter } from "../utils/formatter.js";
 import {
   LLMContext,
+  LLMProvider,
   ReviewerOpinion,
   ConsensusRound,
   ReviewResult,
@@ -26,6 +27,7 @@ interface OrchestratorOptions {
   judgeModel: string;
   maxConsensusRounds: number;
   debug?: boolean;
+  provider?: LLMProvider;
 }
 
 export class ReviewOrchestrator {
@@ -37,7 +39,10 @@ export class ReviewOrchestrator {
   private formatter: Formatter;
 
   constructor(apiKey: string, options: OrchestratorOptions) {
-    this.llmClient = new LLMClient(apiKey, { debug: options.debug });
+    this.llmClient = new LLMClient(apiKey, {
+      debug: options.debug,
+      provider: options.provider,
+    });
     this.logger = new Logger(options.debug);
     this.reviewerModels = options.reviewerModels;
     this.judgeModel = options.judgeModel;

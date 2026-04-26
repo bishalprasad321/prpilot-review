@@ -641,11 +641,11 @@ const inline_comment_builder_js_1 = __nccwpck_require__(6058);
 const formatter_js_1 = __nccwpck_require__(9232);
 const logger = new logger_js_1.Logger();
 const DEFAULT_REVIEWER_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-pro",
+    "llama-3.1-8b-instant",
+    "openai/gpt-oss-20b",
+    "llama-3.3-70b-versatile",
 ];
-const DEFAULT_JUDGE_MODEL = "gemini-2.5-pro";
+const DEFAULT_JUDGE_MODEL = "openai/gpt-oss-120b";
 function normalizeReviewDecision(decision, findingsCount) {
     if (findingsCount > 0) {
         return "REQUEST_CHANGES";
@@ -660,9 +660,12 @@ async function main() {
         // STEP 1: PARSE INPUTS
         // =========================================================================
         logger.step(1, "Parsing inputs from action.yml");
+        const llmProviderInput = core.getInput("llm_provider") || "groq";
+        const llmApiKeyInput = core.getInput("llm_api_key");
         const config = {
             githubToken: core.getInput("github_token"),
-            geminiApiKey: core.getInput("gemini_api_key"),
+            llmProvider: llmProviderInput,
+            llmApiKey: llmApiKeyInput,
             reviewerModels: (core.getInput("reviewer_models") || DEFAULT_REVIEWER_MODELS.join(","))
                 .split(",")
                 .map((m) => m.trim()),
@@ -673,10 +676,15 @@ async function main() {
             enableIncrementalDiffProcessing: core.getInput("enable_incremental_diff_processing") !== "false",
             debug: core.getInput("debug") === "true",
         };
-        if (!config.githubToken || !config.geminiApiKey) {
-            throw new Error("Missing required inputs: github_token or gemini_api_key");
+        if (!config.githubToken || !config.llmApiKey) {
+            throw new Error("Missing required inputs: github_token and llm_api_key");
+        }
+        const supportedProviders = ["gemini", "groq"];
+        if (!supportedProviders.includes(config.llmProvider)) {
+            throw new Error(`Invalid llm_provider '${config.llmProvider}'. Supported providers: ${supportedProviders.join(", ")}`);
         }
         logger.success("✓ Inputs validated");
+        logger.info(`  - LLM Provider: ${config.llmProvider}`);
         logger.info(`  - Reviewer Models: ${config.reviewerModels.join(", ")}`);
         logger.info(`  - Judge Model: ${config.judgeModel}`);
         logger.info(`  - Max Consensus Rounds: ${config.maxConsensusRounds}`);
@@ -790,11 +798,12 @@ async function main() {
         // STEP 9: RUN MULTI-MODEL CONSENSUS REVIEW
         // =========================================================================
         logger.step(9, "Running multi-model consensus review");
-        const orchestrator = new review_orchestrator_js_1.ReviewOrchestrator(config.geminiApiKey, {
+        const orchestrator = new review_orchestrator_js_1.ReviewOrchestrator(config.llmApiKey, {
             reviewerModels: config.reviewerModels,
             judgeModel: config.judgeModel,
             maxConsensusRounds: config.maxConsensusRounds,
             debug: config.debug,
+            provider: config.llmProvider,
         });
         const reviewResult = await orchestrator.runConsensusReview(llmContext);
         logger.success("✓ Consensus review complete");
@@ -901,11 +910,11 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.LLMClient = void 0;
 const node_fetch_1 = __importDefault(__nccwpck_require__(6705));
 const logger_js_1 = __nccwpck_require__(8532);
-class GeminiApiError extends Error {
+class LLMApiError extends Error {
     statusCode;
     constructor(statusCode, message) {
         super(message);
-        this.name = "GeminiApiError";
+        this.name = "LLMApiError";
         this.statusCode = statusCode;
     }
 }
@@ -915,33 +924,48 @@ const MODEL_ALIASES = {
     "gemini-2.0-flash-thinking": "gemini-2.5-pro",
     "gemini-2.0-flash-thinking-exp": "gemini-2.5-pro",
 };
-const REVIEWER_FALLBACK_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-pro",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-];
-const JUDGE_FALLBACK_MODELS = [
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-2.5-flash-lite",
-];
+const FALLBACK_MODELS = {
+    gemini: {
+        reviewer: [
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.5-pro",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+        ],
+        judge: [
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-2.5-flash-lite",
+        ],
+    },
+    groq: {
+        reviewer: ["groq-1.5-mini", "groq-1.5-small"],
+        judge: ["groq-1.5-small", "groq-1.5-mini"],
+    },
+};
 class LLMClient {
     apiKey;
+    provider;
     logger;
     maxRetries;
     retryDelayMs;
-    baseUrl = "https://generativelanguage.googleapis.com/v1beta/models";
+    baseUrl;
     availableGenerateContentModels = null;
     resolvedModelCache = new Map();
     totalTokens = { prompt: 0, completion: 0, total: 0 };
     constructor(apiKey, options = {}) {
         this.apiKey = apiKey;
+        this.provider = options.provider || "gemini";
         this.logger = new logger_js_1.Logger(options.debug);
         this.maxRetries = options.maxRetries || 3;
         this.retryDelayMs = options.retryDelayMs || 1000;
+        this.baseUrl =
+            options.baseUrl ||
+                (this.provider === "groq"
+                    ? "https://api.groq.com/v1/models"
+                    : "https://generativelanguage.googleapis.com/v1beta/models");
     }
     /**
      * Get total tokens used across all API calls in this session
@@ -967,7 +991,7 @@ class LLMClient {
         try {
             let response;
             try {
-                response = await this.callGeminiAPI(resolvedModel, prompt, this.getReviewerResponseSchema());
+                response = await this.callModelAPI(resolvedModel, prompt, this.getReviewerResponseSchema());
             }
             catch (error) {
                 const backupModel = await this.resolveBackupModel("reviewer", [
@@ -977,7 +1001,7 @@ class LLMClient {
                 if (backupModel && this.isModelFailureError(error)) {
                     this.logger.warn(`Reviewer model '${resolvedModel}' failed. Retrying once with backup model '${backupModel}'.`);
                     resolvedModel = backupModel;
-                    response = await this.callGeminiAPI(resolvedModel, prompt, this.getReviewerResponseSchema());
+                    response = await this.callModelAPI(resolvedModel, prompt, this.getReviewerResponseSchema());
                 }
                 else {
                     throw error;
@@ -1005,7 +1029,7 @@ class LLMClient {
         try {
             let response;
             try {
-                response = await this.callGeminiAPI(resolvedModel, prompt, this.getJudgeResponseSchema());
+                response = await this.callModelAPI(resolvedModel, prompt, this.getJudgeResponseSchema());
             }
             catch (error) {
                 const backupModel = await this.resolveBackupModel("judge", [
@@ -1015,7 +1039,7 @@ class LLMClient {
                 if (backupModel && this.isModelFailureError(error)) {
                     this.logger.warn(`Judge model '${resolvedModel}' failed. Retrying once with backup model '${backupModel}'.`);
                     resolvedModel = backupModel;
-                    response = await this.callGeminiAPI(resolvedModel, prompt, this.getJudgeResponseSchema());
+                    response = await this.callModelAPI(resolvedModel, prompt, this.getJudgeResponseSchema());
                 }
                 else {
                     throw error;
@@ -1139,6 +1163,15 @@ Decision rules:
 RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
     }
     /**
+     * Call the configured LLM provider with retry logic
+     */
+    async callModelAPI(model, prompt, responseSchema, attempt = 1) {
+        if (this.provider === "groq") {
+            return this.callGroqAPI(model, prompt, responseSchema, attempt);
+        }
+        return this.callGeminiAPI(model, prompt, responseSchema, attempt);
+    }
+    /**
      * Call Gemini API with retry logic
      */
     async callGeminiAPI(model, prompt, responseSchema, attempt = 1) {
@@ -1173,7 +1206,7 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
             });
             if (!response.ok) {
                 const errorData = (await response.json());
-                throw new GeminiApiError(response.status, `Gemini API error: ${response.status} - ${errorData.error?.message || "Unknown error"}`);
+                throw new LLMApiError(response.status, `Gemini API error: ${response.status} - ${errorData.error?.message || "Unknown error"}`);
             }
             const data = (await response.json());
             // Track token usage from response metadata
@@ -1196,6 +1229,43 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
                 this.logger.warn(`API call failed (attempt ${attempt}/${this.maxRetries}), retrying in ${this.retryDelayMs}ms...`);
                 await this.delay(this.retryDelayMs);
                 return this.callGeminiAPI(model, prompt, responseSchema, attempt + 1);
+            }
+            throw error;
+        }
+    }
+    /**
+     * Call Groq API with retry logic
+     */
+    async callGroqAPI(model, prompt, _responseSchema, attempt = 1) {
+        const url = `${this.baseUrl}/${model}/generate`;
+        const body = {
+            input: prompt,
+            temperature: 0.7,
+            top_p: 0.95,
+            max_output_tokens: 2048,
+            top_k: 40,
+        };
+        try {
+            const response = await (0, node_fetch_1.default)(url, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${this.apiKey}`,
+                },
+                body: JSON.stringify(body),
+            });
+            if (!response.ok) {
+                const errorData = (await response.json());
+                throw new LLMApiError(response.status, `Groq API error: ${response.status} - ${errorData.error?.message || "Unknown error"}`);
+            }
+            const data = (await response.json());
+            return data;
+        }
+        catch (error) {
+            if (attempt < this.maxRetries && this.isRetryableError(error)) {
+                this.logger.warn(`API call failed (attempt ${attempt}/${this.maxRetries}), retrying in ${this.retryDelayMs}ms...`);
+                await this.delay(this.retryDelayMs);
+                return this.callGroqAPI(model, prompt, _responseSchema, attempt + 1);
             }
             throw error;
         }
@@ -1270,7 +1340,17 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
      * Extract text from Gemini response
      */
     extractResponseText(response) {
-        const text = response.candidates?.[0]?.content?.parts
+        if (this.provider === "groq") {
+            const groqResponse = response;
+            const text = groqResponse.output
+                ?.map((out) => out.content
+                ?.map((item) => item.text || "")
+                .join(""))
+                .join("") || "";
+            return text.trim();
+        }
+        const geminiResponse = response;
+        const text = geminiResponse.candidates?.[0]?.content?.parts
             ?.map((part) => part.text || "")
             .join("") || "";
         return text.trim();
@@ -1299,16 +1379,18 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
                 this.resolvedModelCache.set(cacheKey, aliasedModel);
                 return aliasedModel;
             }
-            const fallbackCandidates = purpose === "judge" ? JUDGE_FALLBACK_MODELS : REVIEWER_FALLBACK_MODELS;
+            const fallbackCandidates = purpose === "judge"
+                ? FALLBACK_MODELS[this.provider].judge
+                : FALLBACK_MODELS[this.provider].reviewer;
             const fallback = fallbackCandidates.find((candidate) => availableModels.has(candidate));
             if (fallback) {
-                this.logger.warn(`Model '${normalizedRequestedModel}' is unavailable for generateContent. Falling back to '${fallback}'.`);
+                this.logger.warn(`Model '${normalizedRequestedModel}' is unavailable for ${this.provider} generation. Falling back to '${fallback}'.`);
                 this.resolvedModelCache.set(cacheKey, fallback);
                 return fallback;
             }
         }
         catch (error) {
-            this.logger.warn(`Could not fetch Gemini model list for validation: ${error instanceof Error ? error.message : String(error)}`);
+            this.logger.warn(`Could not fetch ${this.provider.toUpperCase()} model list for validation: ${error instanceof Error ? error.message : String(error)}`);
         }
         this.resolvedModelCache.set(cacheKey, aliasedModel);
         return aliasedModel;
@@ -1320,7 +1402,9 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
         const normalizedExclusions = new Set(excludedModels.map((model) => this.normalizeModelName(model)));
         try {
             const availableModels = await this.getAvailableGenerateContentModels();
-            const fallbackCandidates = purpose === "judge" ? JUDGE_FALLBACK_MODELS : REVIEWER_FALLBACK_MODELS;
+            const fallbackCandidates = purpose === "judge"
+                ? FALLBACK_MODELS[this.provider].judge
+                : FALLBACK_MODELS[this.provider].reviewer;
             const backupModel = fallbackCandidates.find((candidate) => !normalizedExclusions.has(candidate) && availableModels.has(candidate));
             return backupModel || null;
         }
@@ -1334,6 +1418,14 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
     async getAvailableGenerateContentModels() {
         if (this.availableGenerateContentModels) {
             return this.availableGenerateContentModels;
+        }
+        if (this.provider === "groq") {
+            const availableModels = new Set([
+                ...FALLBACK_MODELS.groq.reviewer,
+                ...FALLBACK_MODELS.groq.judge,
+            ]);
+            this.availableGenerateContentModels = availableModels;
+            return availableModels;
         }
         const availableModels = new Set();
         let pageToken;
@@ -1352,7 +1444,7 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
             });
             if (!response.ok) {
                 const errorData = (await response.json());
-                throw new GeminiApiError(response.status, `Gemini model list error: ${response.status} - ${errorData.error?.message || "Unknown error"}`);
+                throw new LLMApiError(response.status, `Gemini model list error: ${response.status} - ${errorData.error?.message || "Unknown error"}`);
             }
             const data = (await response.json());
             for (const model of data.models || []) {
@@ -1650,7 +1742,7 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
      * Retry only transient failures. 4xx model/config errors should fail fast.
      */
     isRetryableError(error) {
-        if (error instanceof GeminiApiError) {
+        if (error instanceof LLMApiError) {
             return error.statusCode === 429 || error.statusCode >= 500;
         }
         return true;
@@ -1659,7 +1751,7 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
      * Detect errors where another model is worth trying.
      */
     isModelFailureError(error) {
-        if (error instanceof GeminiApiError) {
+        if (error instanceof LLMApiError) {
             return error.statusCode === 404 || error.statusCode === 429;
         }
         const message = error instanceof Error ? error.message : String(error);
@@ -1672,7 +1764,7 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
         const errorMsg = error instanceof Error ? error.message : String(error);
         // Log if this is a model availability or quota issue
         if (errorMsg.includes("404") || errorMsg.includes("not found")) {
-            this.logger.error(`⚠️ Model not available: '${modelName}' - Check Gemini API documentation for available models in v1beta`);
+            this.logger.error(`⚠️ Model not available: '${modelName}' - Check ${this.provider.toUpperCase()} API documentation for available models`);
         }
         else if (errorMsg.includes("429") || errorMsg.includes("quota")) {
             this.logger.error(`⚠️ API Quota exceeded for model '${modelName}' - Upgrade billing or wait for quota reset`);
@@ -1948,7 +2040,10 @@ class ReviewOrchestrator {
     maxConsensusRounds;
     formatter;
     constructor(apiKey, options) {
-        this.llmClient = new llm_client_js_1.LLMClient(apiKey, { debug: options.debug });
+        this.llmClient = new llm_client_js_1.LLMClient(apiKey, {
+            debug: options.debug,
+            provider: options.provider,
+        });
         this.logger = new logger_js_1.Logger(options.debug);
         this.reviewerModels = options.reviewerModels;
         this.judgeModel = options.judgeModel;
