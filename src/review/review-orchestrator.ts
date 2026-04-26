@@ -11,6 +11,7 @@
 
 import { Logger } from "../utils/logger.js";
 import { LLMClient } from "../llm/llm-client.js";
+import { Formatter } from "../utils/formatter.js";
 import {
   LLMContext,
   ReviewerOpinion,
@@ -33,6 +34,7 @@ export class ReviewOrchestrator {
   private reviewerModels: string[];
   private judgeModel: string;
   private maxConsensusRounds: number;
+  private formatter: Formatter;
 
   constructor(apiKey: string, options: OrchestratorOptions) {
     this.llmClient = new LLMClient(apiKey, { debug: options.debug });
@@ -40,6 +42,7 @@ export class ReviewOrchestrator {
     this.reviewerModels = options.reviewerModels;
     this.judgeModel = options.judgeModel;
     this.maxConsensusRounds = options.maxConsensusRounds;
+    this.formatter = new Formatter();
 
     if (this.reviewerModels.length !== 3) {
       throw new Error("Exactly 3 reviewer models are required");
@@ -81,7 +84,7 @@ export class ReviewOrchestrator {
 
       if (consensusCheck.isConsensus) {
         this.logger.success(
-          `✅ Consensus achieved! All reviewers agree on: ${consensusCheck.decision}`
+          `✅ Consensus achieved! Majority decision: ${consensusCheck.decision}`
         );
         finalDecision = consensusCheck.decision;
         finalReasoning = this.formatConsensusReasoning(
@@ -154,8 +157,12 @@ export class ReviewOrchestrator {
 
     // Step 4: Consolidate findings
     const inlineFindings = this.consolidateFindings(allOpinions);
+    finalDecision = this.normalizeReviewDecision(finalDecision, inlineFindings);
 
     const executionTime = Date.now() - startTime;
+
+    // Collect token usage data
+    const tokensUsed = this.llmClient.getTokensUsed();
 
     // Build result
     const result: ReviewResult = {
@@ -163,15 +170,25 @@ export class ReviewOrchestrator {
       consensusReasoning: finalReasoning,
       consensusRound,
       totalRounds: consensusRound,
+      reviewerModels: [...this.reviewerModels],
+      judgeModel: this.judgeModel,
       inlineFindings,
-      summaryComment: this.buildSummaryComment(
+      summaryComment: this.formatter.formatReviewComment({
         finalDecision,
-        finalReasoning,
+        consensusReasoning: finalReasoning,
+        consensusRound,
+        totalRounds: consensusRound,
+        reviewerModels: [...this.reviewerModels],
+        judgeModel: this.judgeModel,
         inlineFindings,
-        consensusRound
-      ),
+        summaryComment: "",
+        allOpinions,
+        timestamp: new Date().toISOString(),
+        tokensUsed,
+      }),
       allOpinions,
       timestamp: new Date().toISOString(),
+      tokensUsed,
     };
 
     this.logger.info("=".repeat(70));
@@ -222,7 +239,7 @@ export class ReviewOrchestrator {
   /**
    * Evaluate if consensus is achieved
    *
-   * Consensus = all 3 reviewers have the same decision
+   * Consensus = a majority (2 of 3) reviewers agree on the same decision
    */
   private evaluateConsensus(opinions: ReviewerOpinion[]): {
     isConsensus: boolean;
@@ -232,14 +249,26 @@ export class ReviewOrchestrator {
       return { isConsensus: false, decision: "COMMENT" };
     }
 
-    const decisions = opinions.map((o) => o.decision);
-    const uniqueDecisions = new Set(decisions);
+    const decisionCounts = opinions.reduce<Record<ReviewDecision, number>>(
+      (counts, opinion) => {
+        counts[opinion.decision] += 1;
+        return counts;
+      },
+      {
+        APPROVE: 0,
+        REQUEST_CHANGES: 0,
+        COMMENT: 0,
+      }
+    );
 
-    if (uniqueDecisions.size === 1) {
-      // All reviewers agree
+    const majorityEntry = Object.entries(decisionCounts).find(
+      ([, count]) => count >= 2
+    );
+
+    if (majorityEntry) {
       return {
         isConsensus: true,
-        decision: decisions[0],
+        decision: majorityEntry[0] as ReviewDecision,
       };
     }
 
@@ -247,7 +276,7 @@ export class ReviewOrchestrator {
   }
 
   /**
-   * Format reasoning when all reviewers agree
+   * Format reasoning when a consensus is reached
    */
   private formatConsensusReasoning(
     opinions: ReviewerOpinion[],
@@ -255,8 +284,9 @@ export class ReviewOrchestrator {
     round: number
   ): string {
     const reasons = opinions.map((o) => `- ${o.reasoning}`).join("\n");
+    const agreeingReviewers = opinions.filter((o) => o.decision === decision);
 
-    return `All 3 reviewers unanimously agree on **${decision}** (Round ${round}):
+    return `${agreeingReviewers.length} of 3 reviewers agreed on **${decision}** (Round ${round}):
 
 ${reasons}`;
   }
@@ -299,120 +329,14 @@ ${reasons}`;
     });
   }
 
-  /**
-   * Build summary comment for PR
-   */
-  private buildSummaryComment(
+  private normalizeReviewDecision(
     decision: ReviewDecision,
-    reasoning: string,
-    findings: CodeFinding[],
-    roundNumber: number
-  ): string {
-    const decisionEmoji = this.getDecisionEmoji(decision);
-    const decisionText = this.formatDecision(decision);
-
-    let comment = `## ${decisionEmoji} Multi-Model Consensus Review: ${decisionText}\n\n`;
-
-    comment += `### Consensus Process\n`;
-    comment += `- Consensus achieved in **Round ${roundNumber}**\n`;
-    comment += `- Models reviewed: 3 independent reviewers + 1 judge\n`;
-    comment += `- Code findings: ${findings.length} issue(s)\n\n`;
-
-    comment += `### Judge Reasoning\n${reasoning}\n\n`;
-
-    if (findings.length > 0) {
-      comment += `### Code Issues Found\n`;
-      const bySeverity = this.groupBySeverity(findings);
-
-      if (bySeverity.critical.length > 0) {
-        comment += `\n🔴 **Critical Issues** (${bySeverity.critical.length})\n`;
-        for (const finding of bySeverity.critical) {
-          comment += this.formatFinding(finding);
-        }
-      }
-
-      if (bySeverity.warning.length > 0) {
-        comment += `\n🟡 **Warnings** (${bySeverity.warning.length})\n`;
-        for (const finding of bySeverity.warning) {
-          comment += this.formatFinding(finding);
-        }
-      }
-
-      if (bySeverity.info.length > 0) {
-        comment += `\n🔵 **Info** (${bySeverity.info.length})\n`;
-        for (const finding of bySeverity.info) {
-          comment += this.formatFinding(finding);
-        }
-      }
-    } else {
-      comment += `### ✅ No Issues Found\n`;
-      comment += `All reviewers agree this code looks good!\n`;
-    }
-
-    comment += `\n---\n`;
-    comment += `*Reviewed by PR Pilot Review - AI-powered Multi-Model Consensus Review System*\n`;
-
-    return comment;
-  }
-
-  /**
-   * Group findings by severity
-   */
-  private groupBySeverity(
     findings: CodeFinding[]
-  ): Record<"critical" | "warning" | "info", CodeFinding[]> {
-    return {
-      critical: findings.filter((f) => f.severity === "critical"),
-      warning: findings.filter((f) => f.severity === "warning"),
-      info: findings.filter((f) => f.severity === "info"),
-    };
-  }
-
-  /**
-   * Format a single finding for display
-   */
-  private formatFinding(finding: CodeFinding): string {
-    const lineInfo =
-      finding.lineEnd && finding.lineEnd !== finding.lineStart
-        ? `Lines ${finding.lineStart}-${finding.lineEnd}`
-        : `Line ${finding.lineStart}`;
-
-    let text = `- **${finding.file}** (${lineInfo}): ${finding.message}\n`;
-    if (finding.suggestion) {
-      text += `  > 💡 Suggestion: ${finding.suggestion}\n`;
+  ): ReviewDecision {
+    if (findings.length > 0) {
+      return "REQUEST_CHANGES";
     }
-    return text;
-  }
 
-  /**
-   * Get emoji for decision
-   */
-  private getDecisionEmoji(decision: ReviewDecision): string {
-    switch (decision) {
-      case "APPROVE":
-        return "✅";
-      case "REQUEST_CHANGES":
-        return "❌";
-      case "COMMENT":
-        return "💬";
-      default:
-        return "❓";
-    }
-  }
-
-  /**
-   * Format decision text
-   */
-  private formatDecision(decision: ReviewDecision): string {
-    switch (decision) {
-      case "APPROVE":
-        return "Approved";
-      case "REQUEST_CHANGES":
-        return "Changes Requested";
-      case "COMMENT":
-        return "Comment";
-      default:
-        return "Unknown";
-    }
+    return decision;
   }
 }

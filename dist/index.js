@@ -54,6 +54,7 @@ const LANGUAGE_MAP = {
     ".sql": "sql",
 };
 class DiffProcessor {
+    logger;
     constructor(debug = false) {
         this.logger = new logger_js_1.Logger(debug);
     }
@@ -211,6 +212,10 @@ exports.GitHubClient = void 0;
 const rest_1 = __nccwpck_require__(5772);
 const logger_js_1 = __nccwpck_require__(8532);
 class GitHubClient {
+    octokit;
+    owner;
+    repo;
+    logger;
     constructor(githubToken, config, debug = false) {
         this.octokit = new rest_1.Octokit({ auth: githubToken });
         this.owner = config.owner;
@@ -248,14 +253,10 @@ class GitHubClient {
      */
     async getChangedFiles(prNumber) {
         try {
-            const { data } = await this.octokit.pulls.listFiles({
-                owner: this.owner,
-                repo: this.repo,
-                pull_number: prNumber,
-                per_page: 100,
-            });
+            const data = await this.listAllFiles(prNumber);
             return data.map((file) => ({
                 filename: file.filename,
+                previousFilename: file.previous_filename,
                 status: file.status,
                 additions: file.additions,
                 deletions: file.deletions,
@@ -273,12 +274,7 @@ class GitHubClient {
      */
     async getCommits(prNumber) {
         try {
-            const { data } = await this.octokit.pulls.listCommits({
-                owner: this.owner,
-                repo: this.repo,
-                pull_number: prNumber,
-                per_page: 100,
-            });
+            const data = await this.listAllCommits(prNumber);
             return data.map((commit) => ({
                 sha: commit.sha,
                 message: commit.commit.message,
@@ -296,27 +292,8 @@ class GitHubClient {
      */
     async getDiff(prNumber) {
         try {
-            const { data } = await this.octokit.pulls.get({
-                owner: this.owner,
-                repo: this.repo,
-                pull_number: prNumber,
-            });
-            const diff = await this.octokit.repos.compareCommits({
-                owner: this.owner,
-                repo: this.repo,
-                base: data.base.sha,
-                head: data.head.sha,
-            });
-            return (diff.data.files
-                ?.map((file) => {
-                let diffContent = `diff --git a/${file.filename} b/${file.filename}\n`;
-                diffContent += `index ${file.sha?.slice(0, 7)}...${file.sha?.slice(0, 7)} 100644\n`;
-                diffContent += `--- a/${file.filename}\n`;
-                diffContent += `+++ b/${file.filename}\n`;
-                diffContent += file.patch || "";
-                return diffContent;
-            })
-                .join("\n") || "");
+            const files = await this.listAllFiles(prNumber);
+            return this.buildUnifiedDiff(files);
         }
         catch (error) {
             this.logger.error(`Failed to fetch diff for PR #${prNumber}: ${error instanceof Error ? error.message : String(error)}`);
@@ -351,6 +328,20 @@ class GitHubClient {
         }
     }
     /**
+     * Check whether PR Pilot already reviewed the current head commit.
+     */
+    async hasReviewForCommit(prNumber, headSha) {
+        try {
+            const reviews = await this.listAllReviews(prNumber);
+            return reviews.some((review) => review.commit_id === headSha &&
+                Boolean(review.body?.includes("Reviewed by PR Pilot Review")));
+        }
+        catch (error) {
+            this.logger.warn(`Failed to inspect existing reviews for PR #${prNumber}: ${error instanceof Error ? error.message : String(error)}`);
+            return false;
+        }
+    }
+    /**
      * Submit a PR review with inline comments and summary
      *
      * This creates a single review with:
@@ -358,7 +349,7 @@ class GitHubClient {
      * - A summary comment
      * - A decision (APPROVE, REQUEST_CHANGES, or COMMENT)
      */
-    async submitPRReview(prNumber, comments, decision, summaryBody) {
+    async submitPRReview(prNumber, comments, decision, summaryBody, commitSha) {
         try {
             this.logger.debug(`Submitting PR review with ${comments.length} inline comments, decision: ${decision}`);
             // Convert decision to GitHub review event
@@ -370,15 +361,7 @@ class GitHubClient {
                 side: "RIGHT",
                 body: comment.body,
             }));
-            // Submit review
-            const { data } = await this.octokit.pulls.createReview({
-                owner: this.owner,
-                repo: this.repo,
-                pull_number: prNumber,
-                event,
-                body: summaryBody,
-                comments: reviewComments,
-            });
+            const { data } = await this.createReview(prNumber, event, summaryBody, reviewComments, commitSha);
             this.logger.success(`PR review submitted successfully (ID: ${data.id}, Decision: ${data.state})`);
             return {
                 reviewId: data.id,
@@ -390,6 +373,26 @@ class GitHubClient {
             };
         }
         catch (error) {
+            if (comments.length > 0 && this.isUnresolvableReviewCommentError(error)) {
+                this.logger.warn("Inline comments could not be resolved by GitHub. Retrying with summary-only review.");
+                try {
+                    const event = this.convertDecisionToEvent(decision);
+                    const { data } = await this.createReview(prNumber, event, `${summaryBody}\n\n> Inline comments were skipped because GitHub could not resolve at least one target line in the patch.`, [], commitSha);
+                    return {
+                        reviewId: data.id,
+                        state: this.convertEventToDecision(data.state),
+                        user: {
+                            login: data.user?.login || "unknown",
+                        },
+                        body: data.body || "",
+                    };
+                }
+                catch (retryError) {
+                    this.logger.error(`Failed to submit fallback summary-only review: ${retryError instanceof Error
+                        ? retryError.message
+                        : String(retryError)}`);
+                }
+            }
             this.logger.error(`Failed to submit PR review: ${error instanceof Error ? error.message : String(error)}`);
             return null;
         }
@@ -453,6 +456,115 @@ class GitHubClient {
             default:
                 return "COMMENT";
         }
+    }
+    /**
+     * List every changed file on a PR, not just the first page.
+     */
+    async listAllFiles(prNumber) {
+        const files = [];
+        let page = 1;
+        while (true) {
+            const { data } = await this.octokit.pulls.listFiles({
+                owner: this.owner,
+                repo: this.repo,
+                pull_number: prNumber,
+                per_page: 100,
+                page,
+            });
+            files.push(...data);
+            if (data.length < 100) {
+                break;
+            }
+            page += 1;
+        }
+        return files;
+    }
+    /**
+     * List every commit on a PR.
+     */
+    async listAllCommits(prNumber) {
+        const commits = [];
+        let page = 1;
+        while (true) {
+            const { data } = await this.octokit.pulls.listCommits({
+                owner: this.owner,
+                repo: this.repo,
+                pull_number: prNumber,
+                per_page: 100,
+                page,
+            });
+            commits.push(...data);
+            if (data.length < 100) {
+                break;
+            }
+            page += 1;
+        }
+        return commits;
+    }
+    /**
+     * List every review on a PR.
+     */
+    async listAllReviews(prNumber) {
+        const reviews = [];
+        let page = 1;
+        while (true) {
+            const { data } = await this.octokit.pulls.listReviews({
+                owner: this.owner,
+                repo: this.repo,
+                pull_number: prNumber,
+                per_page: 100,
+                page,
+            });
+            reviews.push(...data);
+            if (data.length < 100) {
+                break;
+            }
+            page += 1;
+        }
+        return reviews;
+    }
+    /**
+     * Build a synthetic unified diff from the PR file list patches.
+     */
+    buildUnifiedDiff(files) {
+        return files
+            .filter((file) => Boolean(file.patch))
+            .map((file) => {
+            const oldPath = file.status === "renamed"
+                ? file.previous_filename || file.filename
+                : file.filename;
+            const fromPath = file.status === "added" ? "/dev/null" : `a/${oldPath}`;
+            const toPath = file.status === "removed" ? "/dev/null" : `b/${file.filename}`;
+            return [
+                `diff --git ${fromPath} ${toPath}`,
+                `--- ${fromPath}`,
+                `+++ ${toPath}`,
+                file.patch || "",
+            ].join("\n");
+        })
+            .join("\n");
+    }
+    /**
+     * Create a review against the current PR head.
+     */
+    async createReview(prNumber, event, body, comments, commitSha) {
+        return this.octokit.pulls.createReview({
+            owner: this.owner,
+            repo: this.repo,
+            pull_number: prNumber,
+            commit_id: commitSha,
+            event,
+            body,
+            comments,
+        });
+    }
+    /**
+     * Detect GitHub's unresolved-line validation error for inline review comments.
+     */
+    isUnresolvableReviewCommentError(error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return (message.includes("Unprocessable Entity") &&
+            message.includes("Line could not be resolved"));
     }
 }
 exports.GitHubClient = GitHubClient;
@@ -526,7 +638,20 @@ const diff_processor_js_1 = __nccwpck_require__(6130);
 const state_manager_js_1 = __nccwpck_require__(1833);
 const review_orchestrator_js_1 = __nccwpck_require__(3134);
 const inline_comment_builder_js_1 = __nccwpck_require__(6058);
+const formatter_js_1 = __nccwpck_require__(9232);
 const logger = new logger_js_1.Logger();
+const DEFAULT_REVIEWER_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-pro",
+];
+const DEFAULT_JUDGE_MODEL = "gemini-2.5-pro";
+function normalizeReviewDecision(decision, findingsCount) {
+    if (findingsCount > 0) {
+        return "REQUEST_CHANGES";
+    }
+    return decision;
+}
 async function main() {
     const startTime = Date.now();
     logger.section("🚀 PR Pilot Review - Starting");
@@ -538,11 +663,10 @@ async function main() {
         const config = {
             githubToken: core.getInput("github_token"),
             geminiApiKey: core.getInput("gemini_api_key"),
-            reviewerModels: (core.getInput("reviewer_models") ||
-                "gemini-2.0-flash,gemini-1.5-flash,gemini-1.5-pro")
+            reviewerModels: (core.getInput("reviewer_models") || DEFAULT_REVIEWER_MODELS.join(","))
                 .split(",")
                 .map((m) => m.trim()),
-            judgeModel: core.getInput("judge_model") || "gemini-2.0-flash-thinking",
+            judgeModel: core.getInput("judge_model") || DEFAULT_JUDGE_MODEL,
             maxConsensusRounds: parseInt(core.getInput("max_consensus_rounds")) || 3,
             inlineCommentsEnabled: core.getInput("inline_comments_enabled") !== "false",
             maxDiffLines: parseInt(core.getInput("max_diff_lines")) || 5000,
@@ -615,7 +739,9 @@ async function main() {
         // STEP 5: STATE CHECK (IDEMPOTENCY)
         // =========================================================================
         logger.step(5, "Checking state (idempotency)");
-        if (stateManager.isAlreadyReviewed(prMetadata.head.sha)) {
+        const alreadyReviewedLocally = stateManager.isAlreadyReviewed(prMetadata.head.sha);
+        const alreadyReviewedOnGitHub = await gitHub.hasReviewForCommit(prNumber, prMetadata.head.sha);
+        if (alreadyReviewedLocally || alreadyReviewedOnGitHub) {
             logger.warn(`⚠️ This commit (${prMetadata.head.sha.slice(0, 7)}) was already reviewed`);
             logger.info("Skipping review to avoid duplicate work");
             core.setOutput("review_decision", "SKIPPED");
@@ -680,11 +806,14 @@ async function main() {
         // =========================================================================
         logger.step(10, "Building inline comments");
         const inlineComments = [];
-        if (config.inlineCommentsEnabled &&
-            reviewResult.inlineFindings.length > 0) {
-            const commentBuilder = new inline_comment_builder_js_1.InlineCommentBuilder(config.debug);
-            commentBuilder.buildFromDiff(files, diffContent);
-            inlineComments.push(...commentBuilder.buildComments(reviewResult.inlineFindings));
+        const commentBuilder = new inline_comment_builder_js_1.InlineCommentBuilder(config.debug);
+        commentBuilder.buildFromFiles(files);
+        const validFindings = commentBuilder.filterCommentableFindings(reviewResult.inlineFindings);
+        reviewResult.inlineFindings = validFindings;
+        reviewResult.finalDecision = normalizeReviewDecision(reviewResult.finalDecision, validFindings.length);
+        reviewResult.summaryComment = new formatter_js_1.Formatter().formatReviewComment(reviewResult);
+        if (config.inlineCommentsEnabled && validFindings.length > 0) {
+            inlineComments.push(...commentBuilder.buildComments(validFindings));
         }
         logger.success("✓ Inline comments built");
         logger.info(`  - Comments: ${inlineComments.length}`);
@@ -692,7 +821,7 @@ async function main() {
         // STEP 11: SUBMIT PR REVIEW
         // =========================================================================
         logger.step(11, "Submitting PR review to GitHub");
-        const reviewResponse = await gitHub.submitPRReview(prNumber, inlineComments, reviewResult.finalDecision, reviewResult.summaryComment);
+        const reviewResponse = await gitHub.submitPRReview(prNumber, inlineComments, reviewResult.finalDecision, reviewResult.summaryComment, prMetadata.head.sha);
         if (!reviewResponse) {
             logger.warn("⚠️ Failed to submit PR review");
         }
@@ -743,6 +872,7 @@ async function main() {
 }
 // Run main
 main().catch((error) => {
+    // eslint-disable-next-line no-console
     console.error("Uncaught error:", error);
     process.exit(1);
 });
@@ -771,13 +901,59 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.LLMClient = void 0;
 const node_fetch_1 = __importDefault(__nccwpck_require__(6705));
 const logger_js_1 = __nccwpck_require__(8532);
+class GeminiApiError extends Error {
+    statusCode;
+    constructor(statusCode, message) {
+        super(message);
+        this.name = "GeminiApiError";
+        this.statusCode = statusCode;
+    }
+}
+const MODEL_ALIASES = {
+    "gemini-3.0-flash": "gemini-2.5-flash",
+    "gemini-3.1-pro": "gemini-2.5-pro",
+    "gemini-2.0-flash-thinking": "gemini-2.5-pro",
+    "gemini-2.0-flash-thinking-exp": "gemini-2.5-pro",
+};
+const REVIEWER_FALLBACK_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-pro",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+];
+const JUDGE_FALLBACK_MODELS = [
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.5-flash-lite",
+];
 class LLMClient {
+    apiKey;
+    logger;
+    maxRetries;
+    retryDelayMs;
+    baseUrl = "https://generativelanguage.googleapis.com/v1beta/models";
+    availableGenerateContentModels = null;
+    resolvedModelCache = new Map();
+    totalTokens = { prompt: 0, completion: 0, total: 0 };
     constructor(apiKey, options = {}) {
-        this.baseUrl = "https://generativelanguage.googleapis.com/v1beta/models";
         this.apiKey = apiKey;
         this.logger = new logger_js_1.Logger(options.debug);
         this.maxRetries = options.maxRetries || 3;
         this.retryDelayMs = options.retryDelayMs || 1000;
+    }
+    /**
+     * Get total tokens used across all API calls in this session
+     */
+    getTokensUsed() {
+        return { ...this.totalTokens };
+    }
+    /**
+     * Reset token counter (useful for new reviews)
+     */
+    resetTokenCounter() {
+        this.totalTokens = { prompt: 0, completion: 0, total: 0 };
     }
     /**
      * Call a reviewer model independently
@@ -786,10 +962,28 @@ class LLMClient {
      */
     async callReviewerModel(model, context, reviewerId) {
         const prompt = this.buildReviewerPrompt(context);
-        this.logger.debug(`Calling reviewer model '${model}' (ID: ${reviewerId})...`);
+        let resolvedModel = await this.resolveModelName(model, "reviewer");
+        this.logger.debug(`Calling reviewer model '${resolvedModel}' (requested: '${model}', ID: ${reviewerId})...`);
         try {
-            const response = await this.callGeminiAPI(model, prompt);
-            const opinion = this.parseReviewerResponse(response, model, reviewerId);
+            let response;
+            try {
+                response = await this.callGeminiAPI(resolvedModel, prompt, this.getReviewerResponseSchema());
+            }
+            catch (error) {
+                const backupModel = await this.resolveBackupModel("reviewer", [
+                    resolvedModel,
+                    model,
+                ]);
+                if (backupModel && this.isModelFailureError(error)) {
+                    this.logger.warn(`Reviewer model '${resolvedModel}' failed. Retrying once with backup model '${backupModel}'.`);
+                    resolvedModel = backupModel;
+                    response = await this.callGeminiAPI(resolvedModel, prompt, this.getReviewerResponseSchema());
+                }
+                else {
+                    throw error;
+                }
+            }
+            const opinion = this.parseReviewerResponse(response, resolvedModel, reviewerId);
             this.logger.debug(`Reviewer '${reviewerId}' decision: ${opinion.decision}`);
             return opinion;
         }
@@ -806,9 +1000,27 @@ class LLMClient {
      */
     async callJudgeModel(model, opinions, context, roundNumber) {
         const prompt = this.buildJudgePrompt(opinions, context, roundNumber);
-        this.logger.debug(`Calling judge model '${model}' for round ${roundNumber}...`);
+        let resolvedModel = await this.resolveModelName(model, "judge");
+        this.logger.debug(`Calling judge model '${resolvedModel}' (requested: '${model}') for round ${roundNumber}...`);
         try {
-            const response = await this.callGeminiAPI(model, prompt);
+            let response;
+            try {
+                response = await this.callGeminiAPI(resolvedModel, prompt, this.getJudgeResponseSchema());
+            }
+            catch (error) {
+                const backupModel = await this.resolveBackupModel("judge", [
+                    resolvedModel,
+                    model,
+                ]);
+                if (backupModel && this.isModelFailureError(error)) {
+                    this.logger.warn(`Judge model '${resolvedModel}' failed. Retrying once with backup model '${backupModel}'.`);
+                    resolvedModel = backupModel;
+                    response = await this.callGeminiAPI(resolvedModel, prompt, this.getJudgeResponseSchema());
+                }
+                else {
+                    throw error;
+                }
+            }
             const decision = this.parseJudgeResponse(response, roundNumber);
             this.logger.debug(`Judge decision: ${decision.decision}`);
             return decision;
@@ -826,10 +1038,7 @@ class LLMClient {
         const filesInfo = context.files
             .map((f) => `- ${f.filename} (${f.status}): +${f.additions}/-${f.deletions}`)
             .join("\n");
-        const diffPreview = context.chunks
-            .slice(0, 3)
-            .map((c) => `\n\`\`\`${c.language || "diff"}\n${c.content.slice(0, 500)}\n...\n\`\`\``)
-            .join("\n");
+        const diffPreview = this.buildDiffPreview(context);
         return `You are an expert code reviewer. Analyze this pull request and provide your review opinion.
 
 **PR Title:** ${context.prTitle}
@@ -842,29 +1051,45 @@ ${filesInfo}
 **Code Changes:**
 ${diffPreview}
 
-Please provide your review in the following JSON format:
+CRITICAL INSTRUCTIONS FOR RESPONSE FORMAT:
+- Your ENTIRE response MUST be a single valid JSON object
+- DO NOT include ANY markdown formatting, code blocks, or explanatory prose
+- DO NOT use triple backticks or any code fence markers
+- DO NOT include ANY text outside the JSON structure
+- Start your response with '{' and end with '}'
+
+Respond ONLY with this exact JSON structure (all fields required, do NOT add any text before or after):
 {
-  "decision": "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
-  "reasoning": "Your reasoning for this decision",
-  "summary": "Brief summary of the PR",
+  "decision": "APPROVE" or "REQUEST_CHANGES" or "COMMENT",
+  "reasoning": "Your detailed reasoning for this decision",
+  "summary": "Brief 1-2 sentence summary of the PR",
   "findings": [
     {
-      "file": "path/to/file",
+      "file": "path/to/file.ts",
       "lineStart": 10,
       "lineEnd": 12,
-      "severity": "critical" | "warning" | "info",
-      "message": "What's wrong",
-      "suggestion": "How to fix it"
+      "severity": "critical" or "warning" or "info",
+      "message": "Specific code issue found",
+      "suggestion": "How to fix it (optional)"
     }
   ]
 }
 
-Be thorough but concise. Focus on:
-1. Code quality and best practices
-2. Potential bugs or issues
-3. Performance concerns
-4. Security implications
-5. Testing coverage`;
+INSTRUCTIONS FOR FINDINGS:
+- Analyze the code and find actual issues if any exist
+- Report findings for specific lines shown in the diff
+- Use exact file names and line numbers from the diff
+- Each finding MUST reference a specific changed line
+- Severity levels: "critical" = security/crash bugs, "warning" = quality/performance issues, "info" = minor improvements
+- Return empty array [] if code is good with no issues found
+
+Examples of good findings:
+- "Missing null check on user object before accessing .email property"
+- "SQL injection vulnerability: user input not sanitized in query"
+- "Variable declared but never used"
+- "Inefficient O(n²) loop can be optimized to O(n)"
+
+RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
     }
     /**
      * Build prompt for judge model
@@ -889,27 +1114,34 @@ Your task:
 1. Analyze each reviewer's opinion
 2. Identify areas of agreement and disagreement
 3. Make a final consensus decision considering all perspectives
-4. If opinions strongly differ, you may request another round of reviews OR make a final judgment call
 
-Respond in JSON format:
+CRITICAL INSTRUCTIONS FOR RESPONSE FORMAT:
+- Your ENTIRE response MUST be a single valid JSON object
+- DO NOT include ANY markdown formatting, code blocks, or explanatory prose
+- DO NOT use triple backticks or any code fence markers
+- DO NOT include ANY text outside the JSON structure
+- Start your response with '{' and end with '}'
+
+Respond ONLY with this exact JSON structure (all fields required, do NOT add any text before or after):
 {
-  "decision": "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
-  "reasoning": "Your reasoning synthesizing all opinions",
+  "decision": "APPROVE" or "REQUEST_CHANGES" or "COMMENT",
+  "reasoning": "Your reasoning synthesizing all reviewer opinions",
   "confidence": 0.95,
   "needsRetry": false,
   "roundsNeeded": ${roundNumber}
 }
 
-Guidelines:
-- If 2+ reviewers agree, typically that's consensus
-- If all 3 disagree, use your judgment to find the best path forward
-- confidence: how confident you are (0-1)
-- needsRetry: true only if you think another round would help (max 3 rounds)`;
+Decision rules:
+- "APPROVE": All reviewers agree OR 2+ approve with no critical findings
+- "REQUEST_CHANGES": 2+ found critical issues OR unanimous REQUEST_CHANGES
+- "COMMENT": Mixed opinions with minor issues
+
+RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
     }
     /**
      * Call Gemini API with retry logic
      */
-    async callGeminiAPI(model, prompt, attempt = 1) {
+    async callGeminiAPI(model, prompt, responseSchema, attempt = 1) {
         const url = `${this.baseUrl}/${model}:generateContent?key=${this.apiKey}`;
         const body = {
             contents: [
@@ -927,6 +1159,8 @@ Guidelines:
                 topK: 40,
                 topP: 0.95,
                 maxOutputTokens: 2048,
+                responseMimeType: "application/json",
+                responseJsonSchema: responseSchema,
             },
         };
         try {
@@ -939,15 +1173,29 @@ Guidelines:
             });
             if (!response.ok) {
                 const errorData = (await response.json());
-                throw new Error(`Gemini API error: ${response.status} - ${errorData.error?.message || "Unknown error"}`);
+                throw new GeminiApiError(response.status, `Gemini API error: ${response.status} - ${errorData.error?.message || "Unknown error"}`);
             }
-            return (await response.json());
+            const data = (await response.json());
+            // Track token usage from response metadata
+            if (data.usageMetadata) {
+                if (data.usageMetadata.promptTokenCount) {
+                    this.totalTokens.prompt += data.usageMetadata.promptTokenCount;
+                }
+                if (data.usageMetadata.candidatesTokenCount) {
+                    this.totalTokens.completion +=
+                        data.usageMetadata.candidatesTokenCount;
+                }
+                if (data.usageMetadata.totalTokenCount) {
+                    this.totalTokens.total += data.usageMetadata.totalTokenCount;
+                }
+            }
+            return data;
         }
         catch (error) {
-            if (attempt < this.maxRetries) {
+            if (attempt < this.maxRetries && this.isRetryableError(error)) {
                 this.logger.warn(`API call failed (attempt ${attempt}/${this.maxRetries}), retrying in ${this.retryDelayMs}ms...`);
                 await this.delay(this.retryDelayMs);
-                return this.callGeminiAPI(model, prompt, attempt + 1);
+                return this.callGeminiAPI(model, prompt, responseSchema, attempt + 1);
             }
             throw error;
         }
@@ -956,74 +1204,484 @@ Guidelines:
      * Parse reviewer model response
      */
     parseReviewerResponse(response, modelName, reviewerId) {
+        const text = this.extractResponseText(response);
+        if (!text) {
+            throw new Error("Empty response from model");
+        }
         try {
-            const text = this.extractResponseText(response);
-            if (!text) {
-                throw new Error("Empty response from model");
-            }
-            const jsonMatch = text.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) {
-                throw new Error("Could not find JSON in response");
-            }
-            const parsed = JSON.parse(jsonMatch[0]);
+            const parsed = this.parseStructuredJson(text, "response");
             return {
                 reviewerId,
                 modelName,
-                decision: parsed.decision,
-                reasoning: parsed.reasoning,
-                findings: parsed.findings || [],
-                summary: parsed.summary,
+                decision: this.normalizeDecision(parsed.decision),
+                reasoning: parsed.reasoning || "No reasoning provided.",
+                findings: this.normalizeFindings(parsed.findings || []),
+                summary: parsed.summary || "No summary provided.",
                 timestamp: new Date().toISOString(),
             };
         }
         catch (error) {
-            this.logger.error(`Failed to parse reviewer response: ${error instanceof Error ? error.message : String(error)}`);
-            throw error;
+            const errorDetails = error instanceof Error ? error.message : String(error);
+            this.logger.warn(`Reviewer '${modelName}' returned non-JSON output. Falling back to text parsing. Error details: ${errorDetails}`);
+            // Extract findings from text response (don't lose findings!)
+            const findings = this.extractFindingsFromText(text);
+            return {
+                reviewerId,
+                modelName,
+                decision: this.extractDecisionFromText(text),
+                reasoning: text,
+                findings,
+                summary: text.slice(0, 300),
+                timestamp: new Date().toISOString(),
+            };
         }
     }
     /**
      * Parse judge model response
      */
     parseJudgeResponse(response, roundNumber) {
+        const text = this.extractResponseText(response);
+        if (!text) {
+            throw new Error("Empty response from judge model");
+        }
         try {
-            const text = this.extractResponseText(response);
-            if (!text) {
-                throw new Error("Empty response from judge model");
-            }
-            const jsonMatch = text.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) {
-                throw new Error("Could not find JSON in judge response");
-            }
-            const parsed = JSON.parse(jsonMatch[0]);
+            const parsed = this.parseStructuredJson(text, "judge response");
             return {
-                decision: parsed.decision,
-                reasoning: parsed.reasoning,
-                confidence: parsed.confidence,
+                decision: this.normalizeDecision(parsed.decision),
+                reasoning: parsed.reasoning || "No reasoning provided.",
+                confidence: this.normalizeConfidence(parsed.confidence),
                 roundsNeeded: parsed.roundsNeeded || roundNumber,
                 forcedAfterMaxRounds: false,
             };
         }
         catch (error) {
-            this.logger.error(`Failed to parse judge response: ${error instanceof Error ? error.message : String(error)}`);
-            throw error;
+            const errorDetails = error instanceof Error ? error.message : String(error);
+            this.logger.warn(`Judge response was not valid JSON. Falling back to heuristic parsing. Error details: ${errorDetails}`);
+            return {
+                decision: this.extractDecisionFromText(text),
+                reasoning: text,
+                confidence: 0.35,
+                roundsNeeded: roundNumber,
+                forcedAfterMaxRounds: false,
+            };
         }
     }
     /**
      * Extract text from Gemini response
      */
     extractResponseText(response) {
-        const text = response.candidates?.[0]?.content?.parts?.[0]?.text || "";
+        const text = response.candidates?.[0]?.content?.parts
+            ?.map((part) => part.text || "")
+            .join("") || "";
         return text.trim();
+    }
+    /**
+     * Resolve a requested model against the current v1beta model list.
+     *
+     * This keeps legacy aliases working when users still pass stale model IDs.
+     */
+    async resolveModelName(requestedModel, purpose) {
+        const normalizedRequestedModel = this.normalizeModelName(requestedModel);
+        const cacheKey = `${purpose}:${normalizedRequestedModel}`;
+        const cached = this.resolvedModelCache.get(cacheKey);
+        if (cached) {
+            return cached;
+        }
+        const aliasedModel = MODEL_ALIASES[normalizedRequestedModel] || normalizedRequestedModel;
+        try {
+            const availableModels = await this.getAvailableGenerateContentModels();
+            if (availableModels.has(normalizedRequestedModel)) {
+                this.resolvedModelCache.set(cacheKey, normalizedRequestedModel);
+                return normalizedRequestedModel;
+            }
+            if (availableModels.has(aliasedModel)) {
+                this.logger.warn(`Model '${normalizedRequestedModel}' is not available in v1beta. Using '${aliasedModel}' instead.`);
+                this.resolvedModelCache.set(cacheKey, aliasedModel);
+                return aliasedModel;
+            }
+            const fallbackCandidates = purpose === "judge" ? JUDGE_FALLBACK_MODELS : REVIEWER_FALLBACK_MODELS;
+            const fallback = fallbackCandidates.find((candidate) => availableModels.has(candidate));
+            if (fallback) {
+                this.logger.warn(`Model '${normalizedRequestedModel}' is unavailable for generateContent. Falling back to '${fallback}'.`);
+                this.resolvedModelCache.set(cacheKey, fallback);
+                return fallback;
+            }
+        }
+        catch (error) {
+            this.logger.warn(`Could not fetch Gemini model list for validation: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        this.resolvedModelCache.set(cacheKey, aliasedModel);
+        return aliasedModel;
+    }
+    /**
+     * Choose a backup model when the requested model is blocked or unavailable.
+     */
+    async resolveBackupModel(purpose, excludedModels) {
+        const normalizedExclusions = new Set(excludedModels.map((model) => this.normalizeModelName(model)));
+        try {
+            const availableModels = await this.getAvailableGenerateContentModels();
+            const fallbackCandidates = purpose === "judge" ? JUDGE_FALLBACK_MODELS : REVIEWER_FALLBACK_MODELS;
+            const backupModel = fallbackCandidates.find((candidate) => !normalizedExclusions.has(candidate) && availableModels.has(candidate));
+            return backupModel || null;
+        }
+        catch {
+            return null;
+        }
+    }
+    /**
+     * Fetch the current set of models that support generateContent in v1beta.
+     */
+    async getAvailableGenerateContentModels() {
+        if (this.availableGenerateContentModels) {
+            return this.availableGenerateContentModels;
+        }
+        const availableModels = new Set();
+        let pageToken;
+        do {
+            const url = new URL(this.baseUrl);
+            url.searchParams.set("key", this.apiKey);
+            url.searchParams.set("pageSize", "1000");
+            if (pageToken) {
+                url.searchParams.set("pageToken", pageToken);
+            }
+            const response = await (0, node_fetch_1.default)(url.toString(), {
+                method: "GET",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+            });
+            if (!response.ok) {
+                const errorData = (await response.json());
+                throw new GeminiApiError(response.status, `Gemini model list error: ${response.status} - ${errorData.error?.message || "Unknown error"}`);
+            }
+            const data = (await response.json());
+            for (const model of data.models || []) {
+                const name = this.normalizeModelName(model.name || "");
+                if (name &&
+                    model.supportedGenerationMethods?.includes("generateContent")) {
+                    availableModels.add(name);
+                }
+            }
+            pageToken = data.nextPageToken;
+        } while (pageToken);
+        this.availableGenerateContentModels = availableModels;
+        return availableModels;
+    }
+    /**
+     * JSON schema for reviewer responses.
+     */
+    getReviewerResponseSchema() {
+        return {
+            type: "object",
+            properties: {
+                decision: {
+                    type: "string",
+                    enum: ["APPROVE", "REQUEST_CHANGES", "COMMENT"],
+                },
+                reasoning: { type: "string" },
+                summary: { type: "string" },
+                findings: {
+                    type: "array",
+                    items: {
+                        type: "object",
+                        properties: {
+                            file: { type: "string" },
+                            lineStart: { type: "integer" },
+                            lineEnd: { type: ["integer", "null"] },
+                            severity: {
+                                type: "string",
+                                enum: ["critical", "warning", "info"],
+                            },
+                            message: { type: "string" },
+                            suggestion: { type: ["string", "null"] },
+                        },
+                        required: ["file", "lineStart", "severity", "message"],
+                    },
+                },
+            },
+            required: ["decision", "reasoning", "summary", "findings"],
+        };
+    }
+    /**
+     * JSON schema for judge responses.
+     */
+    getJudgeResponseSchema() {
+        return {
+            type: "object",
+            properties: {
+                decision: {
+                    type: "string",
+                    enum: ["APPROVE", "REQUEST_CHANGES", "COMMENT"],
+                },
+                reasoning: { type: "string" },
+                confidence: { type: "number" },
+                needsRetry: { type: "boolean" },
+                roundsNeeded: { type: "integer" },
+            },
+            required: ["decision", "reasoning", "confidence", "roundsNeeded"],
+        };
+    }
+    /**
+     * Parse a JSON object from Gemini output.
+     * Handles multiple response formats:
+     * - Pure JSON
+     * - JSON wrapped in markdown code blocks
+     * - JSON embedded in text
+     * - Malformed JSON with trailing/leading text
+     */
+    parseStructuredJson(text, label) {
+        if (!text || text.trim().length === 0) {
+            throw new Error(`Empty response received for ${label}`);
+        }
+        // Attempt 1: Direct parse
+        try {
+            return JSON.parse(text);
+        }
+        catch {
+            // Continue to next attempt
+        }
+        // Attempt 2: Strip markdown code blocks
+        const stripped = text
+            .replace(/^```(?:json)?\s*/i, "")
+            .replace(/\s*```\s*$/i, "")
+            .trim();
+        try {
+            return JSON.parse(stripped);
+        }
+        catch {
+            // Continue to next attempt
+        }
+        // Attempt 3: Extract the most promising JSON object
+        // Find all potential JSON objects and try the largest/most complete one
+        const jsonMatches = Array.from(stripped.matchAll(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g));
+        if (jsonMatches.length > 0) {
+            // Try each match, prioritizing the longest (most complete)
+            const sortedMatches = jsonMatches.sort((a, b) => b[0].length - a[0].length);
+            for (const match of sortedMatches) {
+                try {
+                    return JSON.parse(match[0]);
+                }
+                catch {
+                    // Try next match
+                    continue;
+                }
+            }
+        }
+        // Attempt 4: Last resort - try to find JSON by looking for key patterns
+        const keyPattern = /"(decision|reasoning|findings|confidence|summary)"\s*:/i;
+        const keyMatch = stripped.match(keyPattern);
+        if (keyMatch) {
+            const keyStartIndex = stripped.indexOf(keyMatch[0]);
+            if (keyStartIndex >= 0) {
+                const jsonStart = Math.max(0, stripped.lastIndexOf("{", keyStartIndex));
+                const jsonEnd = stripped.length - 1;
+                if (jsonStart >= 0) {
+                    try {
+                        return JSON.parse(stripped.substring(jsonStart, jsonEnd + 1));
+                    }
+                    catch {
+                        // Last attempt failed
+                    }
+                }
+            }
+        }
+        throw new Error(`Could not find valid JSON in ${label}. Response was: ${text.slice(0, 200)}${text.length > 200 ? "..." : ""}`);
+    }
+    /**
+     * Build a bounded diff preview so reviewers have enough context without
+     * exhausting prompt budget.
+     */
+    buildDiffPreview(context) {
+        const sections = [];
+        let totalChars = 0;
+        const maxChars = 12000;
+        for (const chunk of context.chunks) {
+            const snippet = [
+                `File: ${chunk.file}`,
+                `\`\`\`${chunk.language || "diff"}`,
+                chunk.content.slice(0, 1200),
+                `\`\`\``,
+            ].join("\n");
+            if (totalChars + snippet.length > maxChars) {
+                break;
+            }
+            sections.push(snippet);
+            totalChars += snippet.length;
+        }
+        return sections.join("\n\n");
+    }
+    /**
+     * Normalize model names so both `models/foo` and `foo` inputs work.
+     */
+    normalizeModelName(modelName) {
+        return modelName.replace(/^models\//, "").trim();
+    }
+    /**
+     * Normalize reviewer findings before they enter the rest of the pipeline.
+     */
+    normalizeFindings(findings) {
+        return findings
+            .filter((finding) => Boolean(finding.file) &&
+            Number.isFinite(finding.lineStart) &&
+            finding.lineStart > 0 &&
+            Boolean(finding.message))
+            .map((finding) => ({
+            ...finding,
+            file: finding.file.trim(),
+            lineStart: Math.trunc(finding.lineStart),
+            lineEnd: typeof finding.lineEnd === "number"
+                ? Math.trunc(finding.lineEnd)
+                : undefined,
+            severity: finding.severity || "info",
+            message: finding.message.trim(),
+            suggestion: finding.suggestion?.trim() || undefined,
+        }));
+    }
+    /**
+     * Clamp judge confidence into the expected 0-1 range.
+     */
+    normalizeConfidence(confidence) {
+        if (!Number.isFinite(confidence)) {
+            return 0;
+        }
+        return Math.max(0, Math.min(1, confidence));
+    }
+    /**
+     * Ensure the parsed decision is a supported review state.
+     */
+    normalizeDecision(decision) {
+        if (decision === "APPROVE" ||
+            decision === "REQUEST_CHANGES" ||
+            decision === "COMMENT") {
+            return decision;
+        }
+        return "COMMENT";
+    }
+    /**
+     * Heuristic fallback when a model ignored JSON mode but still returned text.
+     * Extracts decision with higher confidence from plain text responses.
+     */
+    extractDecisionFromText(text) {
+        const normalized = text.toUpperCase();
+        // Strong indicators for REQUEST_CHANGES
+        const requestChangesPatterns = [
+            /\bREQUEST[S]?\s+CHANGES?\b/,
+            /\bREQUEST[S]?\s+MORE?\s+CHANGES?\b/,
+            /\bCHANGES\s+REQUESTED\b/,
+            /\breject(?:ed)?\b/,
+            /\bdo\s+not\s+approve\b/,
+            /\bcritical\s+issue/,
+            /\bsecurity\s+vulnerability/,
+            /\bdo\s+not\s+merge\b/,
+        ];
+        for (const pattern of requestChangesPatterns) {
+            if (pattern.test(normalized)) {
+                return "REQUEST_CHANGES";
+            }
+        }
+        // Strong indicators for APPROVE
+        const approvePatterns = [
+            /\bAPPROV(?:ED?)?\b/,
+            /\blooks\s+good\b/,
+            /\bthis\s+is\s+good\b/,
+            /\bno\s+issues\b/,
+            /\bno\s+problems\b/,
+            /\bcan\s+merge\b/,
+            /\bready\s+to\s+merge\b/,
+            /\blegit\b/,
+        ];
+        for (const pattern of approvePatterns) {
+            if (pattern.test(normalized)) {
+                return "APPROVE";
+            }
+        }
+        return "COMMENT";
+    }
+    /**
+     * Extract findings from text when JSON parsing fails.
+     * Looks for patterns like "file.ts:line" or common issue descriptions.
+     */
+    extractFindingsFromText(text) {
+        const findings = [];
+        // Pattern 1: "file.ts:123 - message" or "file.ts (line 123) - message"
+        const fileLinePattern = /([^\s:]+\.(?:ts|js|tsx|jsx|py|go|java|rs|cpp|c|h|rb|php|cs|swift))[:\s]*(?:line\s*)?(\d+)[\s-]*([^\n]+)/gi;
+        let match;
+        while ((match = fileLinePattern.exec(text)) !== null) {
+            const [, file, lineStr, message] = match;
+            const lineNum = parseInt(lineStr, 10);
+            if (file && !isNaN(lineNum)) {
+                findings.push({
+                    file,
+                    lineStart: lineNum,
+                    severity: this.detectSeverityFromText(message),
+                    message: message.trim().slice(0, 200),
+                });
+            }
+        }
+        // Deduplicate findings by file+line+message
+        const seen = new Set();
+        return findings.filter((f) => {
+            const key = `${f.file}:${f.lineStart}:${f.message}`;
+            if (seen.has(key))
+                return false;
+            seen.add(key);
+            return true;
+        });
+    }
+    /**
+     * Detect severity level from text patterns
+     */
+    detectSeverityFromText(text) {
+        const normalized = text.toUpperCase();
+        if (normalized.includes("CRITICAL") ||
+            normalized.includes("SECURITY") ||
+            normalized.includes("BUG") ||
+            normalized.includes("ERROR")) {
+            return "critical";
+        }
+        if (normalized.includes("WARNING") ||
+            normalized.includes("ISSUE") ||
+            normalized.includes("PROBLEM")) {
+            return "warning";
+        }
+        return "info";
+    }
+    /**
+     * Retry only transient failures. 4xx model/config errors should fail fast.
+     */
+    isRetryableError(error) {
+        if (error instanceof GeminiApiError) {
+            return error.statusCode === 429 || error.statusCode >= 500;
+        }
+        return true;
+    }
+    /**
+     * Detect errors where another model is worth trying.
+     */
+    isModelFailureError(error) {
+        if (error instanceof GeminiApiError) {
+            return error.statusCode === 404 || error.statusCode === 429;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        return message.includes("404") || message.includes("429");
     }
     /**
      * Create a failed reviewer opinion
      */
     createFailedReviewerOpinion(modelName, reviewerId, error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        // Log if this is a model availability or quota issue
+        if (errorMsg.includes("404") || errorMsg.includes("not found")) {
+            this.logger.error(`⚠️ Model not available: '${modelName}' - Check Gemini API documentation for available models in v1beta`);
+        }
+        else if (errorMsg.includes("429") || errorMsg.includes("quota")) {
+            this.logger.error(`⚠️ API Quota exceeded for model '${modelName}' - Upgrade billing or wait for quota reset`);
+        }
         return {
             reviewerId,
             modelName,
             decision: "COMMENT",
-            reasoning: `Reviewer model failed: ${error instanceof Error ? error.message : String(error)}`,
+            reasoning: `Reviewer model '${modelName}' failed: ${errorMsg}. Fallback to COMMENT decision.`,
             findings: [],
             summary: "Review could not be completed due to API error",
             timestamp: new Date().toISOString(),
@@ -1070,27 +1728,32 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.InlineCommentBuilder = void 0;
 const logger_js_1 = __nccwpck_require__(8532);
 class InlineCommentBuilder {
+    logger;
+    fileDiffs = new Map();
     constructor(debug = false) {
-        this.fileDiffs = new Map();
         this.logger = new logger_js_1.Logger(debug);
     }
     /**
-     * Initialize with file changes and diff content
+     * Initialize with file changes
      *
-     * Parse the diff to build a line number map for each file
+     * Parse each file patch to build a commentable line map.
      */
-    buildFromDiff(files, diffContent) {
+    buildFromFiles(files) {
         this.logger.debug(`Building inline comment maps from ${files.length} files`);
-        const diffSections = this.parseDiffSections(diffContent);
+        this.fileDiffs.clear();
         for (const file of files) {
-            const section = diffSections.find((s) => s.file === file.filename);
-            if (section) {
-                this.fileDiffs.set(file.filename, {
-                    file: file.filename,
-                    status: file.status,
-                    lines: section.lines,
-                });
+            if (!file.patch) {
+                continue;
             }
+            const patchLines = this.parsePatch(file.patch);
+            if (patchLines.length === 0) {
+                continue;
+            }
+            this.fileDiffs.set(file.filename, {
+                file: file.filename,
+                status: file.status,
+                lines: patchLines,
+            });
         }
         this.logger.debug(`Indexed ${this.fileDiffs.size} files for inline comments`);
     }
@@ -1129,6 +1792,18 @@ class InlineCommentBuilder {
         return comments;
     }
     /**
+     * Keep only findings that can be mapped to the current patch.
+     */
+    filterCommentableFindings(findings) {
+        return findings.filter((finding) => {
+            const fileDiff = this.fileDiffs.get(finding.file);
+            if (!fileDiff) {
+                return false;
+            }
+            return Boolean(this.findLineInDiff(fileDiff.lines, finding.lineStart, finding.file));
+        });
+    }
+    /**
      * Build comment body from a finding
      */
     buildCommentBody(finding) {
@@ -1142,77 +1817,52 @@ class InlineCommentBuilder {
         return body;
     }
     /**
-     * Parse diff content into sections by file
+     * Parse a single file patch into commentable lines.
      */
-    parseDiffSections(diffContent) {
-        const sections = [];
-        const lines = diffContent.split("\n");
-        let currentFile = null;
-        let currentLines = [];
+    parsePatch(patch) {
+        const diffLines = [];
+        const lines = patch.split("\n");
         let lineNumber = 0;
+        let hunkId = 0;
         for (const line of lines) {
-            // Detect file header: "diff --git a/path b/path"
-            if (line.startsWith("diff --git")) {
-                if (currentFile) {
-                    sections.push({
-                        file: currentFile,
-                        lines: currentLines,
-                    });
-                }
-                const match = line.match(/b\/(.+)$/);
-                currentFile = match ? match[1] : null;
-                currentLines = [];
-                lineNumber = 0;
-                continue;
-            }
-            // Skip hunk headers and other metadata
             if (line.startsWith("@@")) {
-                // Parse hunk header to get line numbers
                 const hunkMatch = line.match(/@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
                 if (hunkMatch) {
                     lineNumber = parseInt(hunkMatch[1], 10) - 1;
+                    hunkId += 1;
                 }
                 continue;
             }
-            if (!currentFile) {
-                continue;
-            }
-            // Process diff lines
-            if (line.startsWith("+") && !line.startsWith("+++")) {
-                lineNumber++;
-                currentLines.push({
+            if (line.startsWith("+")) {
+                lineNumber += 1;
+                diffLines.push({
                     type: "add",
                     lineNumber,
+                    hunkId,
                     content: line.slice(1),
                 });
+                continue;
             }
-            else if (line.startsWith("-") && !line.startsWith("---")) {
-                currentLines.push({
+            if (line.startsWith("-")) {
+                diffLines.push({
                     type: "remove",
-                    lineNumber: lineNumber,
+                    lineNumber,
+                    hunkId,
                     content: line.slice(1),
                 });
+                continue;
             }
-            else if (!line.startsWith("\\")) {
-                // Context line (not starting with +/-)
-                if (line.length > 0) {
-                    lineNumber++;
-                    currentLines.push({
-                        type: "context",
-                        lineNumber,
-                        content: line,
-                    });
-                }
+            if (!line.startsWith("\\")) {
+                lineNumber += 1;
+                diffLines.push({
+                    type: "context",
+                    lineNumber,
+                    hunkId,
+                    content: line.startsWith(" ") ? line.slice(1) : line,
+                });
             }
         }
-        // Add the last section
-        if (currentFile) {
-            sections.push({
-                file: currentFile,
-                lines: currentLines,
-            });
-        }
-        return sections;
+        return diffLines;
     }
     /**
      * Find the corresponding line in the diff
@@ -1220,29 +1870,27 @@ class InlineCommentBuilder {
      * GitHub PR review API requires the line number as it appears in the new version
      */
     findLineInDiff(diffLines, targetLine, file) {
-        // Find lines that were added or are context (visible in new version)
-        const visibleLines = diffLines.filter((l) => l.type === "add" || l.type === "context");
-        // The targetLine is based on line numbers in the new version
-        // Find the nth visible line that corresponds to this line number
-        for (const diffLine of visibleLines) {
-            if (diffLine.lineNumber === targetLine) {
-                return diffLine;
+        if (targetLine <= 0) {
+            return null;
+        }
+        const exactAddedLine = diffLines.find((line) => line.type === "add" && line.lineNumber === targetLine);
+        if (exactAddedLine) {
+            return exactAddedLine;
+        }
+        const matchingContextLine = diffLines.find((line) => line.type === "context" && line.lineNumber === targetLine);
+        if (matchingContextLine) {
+            const sameHunkAddedLines = diffLines
+                .filter((line) => line.type === "add" && line.hunkId === matchingContextLine.hunkId)
+                .sort((left, right) => Math.abs(left.lineNumber - targetLine) -
+                Math.abs(right.lineNumber - targetLine));
+            const nearestSameHunkAddedLine = sameHunkAddedLines[0];
+            if (nearestSameHunkAddedLine &&
+                Math.abs(nearestSameHunkAddedLine.lineNumber - targetLine) <= 5) {
+                this.logger.warn(`Line ${targetLine} in ${file} was unchanged in the patch. Using nearby added line ${nearestSameHunkAddedLine.lineNumber} instead.`);
+                return nearestSameHunkAddedLine;
             }
         }
-        // If exact match not found, try to find the closest line
-        let closestLine = null;
-        let closestDistance = Infinity;
-        for (const diffLine of visibleLines) {
-            const distance = Math.abs(diffLine.lineNumber - targetLine);
-            if (distance < closestDistance) {
-                closestDistance = distance;
-                closestLine = diffLine;
-            }
-        }
-        if (closestLine) {
-            this.logger.warn(`Line ${targetLine} not found in diff for ${file}, using closest line ${closestLine.lineNumber}`);
-            return closestLine;
-        }
+        this.logger.warn(`Line ${targetLine} in ${file} is not commentable in the current patch`);
         return null;
     }
     /**
@@ -1291,13 +1939,21 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.ReviewOrchestrator = void 0;
 const logger_js_1 = __nccwpck_require__(8532);
 const llm_client_js_1 = __nccwpck_require__(6147);
+const formatter_js_1 = __nccwpck_require__(9232);
 class ReviewOrchestrator {
+    llmClient;
+    logger;
+    reviewerModels;
+    judgeModel;
+    maxConsensusRounds;
+    formatter;
     constructor(apiKey, options) {
         this.llmClient = new llm_client_js_1.LLMClient(apiKey, { debug: options.debug });
         this.logger = new logger_js_1.Logger(options.debug);
         this.reviewerModels = options.reviewerModels;
         this.judgeModel = options.judgeModel;
         this.maxConsensusRounds = options.maxConsensusRounds;
+        this.formatter = new formatter_js_1.Formatter();
         if (this.reviewerModels.length !== 3) {
             throw new Error("Exactly 3 reviewer models are required");
         }
@@ -1330,7 +1986,7 @@ class ReviewOrchestrator {
             // Step 2: Evaluate if consensus already achieved
             const consensusCheck = this.evaluateConsensus(opinions);
             if (consensusCheck.isConsensus) {
-                this.logger.success(`✅ Consensus achieved! All reviewers agree on: ${consensusCheck.decision}`);
+                this.logger.success(`✅ Consensus achieved! Majority decision: ${consensusCheck.decision}`);
                 finalDecision = consensusCheck.decision;
                 finalReasoning = this.formatConsensusReasoning(opinions, consensusCheck.decision, round);
                 const round_data = {
@@ -1373,17 +2029,35 @@ class ReviewOrchestrator {
         }
         // Step 4: Consolidate findings
         const inlineFindings = this.consolidateFindings(allOpinions);
+        finalDecision = this.normalizeReviewDecision(finalDecision, inlineFindings);
         const executionTime = Date.now() - startTime;
+        // Collect token usage data
+        const tokensUsed = this.llmClient.getTokensUsed();
         // Build result
         const result = {
             finalDecision,
             consensusReasoning: finalReasoning,
             consensusRound,
             totalRounds: consensusRound,
+            reviewerModels: [...this.reviewerModels],
+            judgeModel: this.judgeModel,
             inlineFindings,
-            summaryComment: this.buildSummaryComment(finalDecision, finalReasoning, inlineFindings, consensusRound),
+            summaryComment: this.formatter.formatReviewComment({
+                finalDecision,
+                consensusReasoning: finalReasoning,
+                consensusRound,
+                totalRounds: consensusRound,
+                reviewerModels: [...this.reviewerModels],
+                judgeModel: this.judgeModel,
+                inlineFindings,
+                summaryComment: "",
+                allOpinions,
+                timestamp: new Date().toISOString(),
+                tokensUsed,
+            }),
             allOpinions,
             timestamp: new Date().toISOString(),
+            tokensUsed,
         };
         this.logger.info("=".repeat(70));
         this.logger.success(`✅ Consensus Review Complete (${executionTime}ms, ${consensusRound} rounds)`);
@@ -1412,29 +2086,36 @@ class ReviewOrchestrator {
     /**
      * Evaluate if consensus is achieved
      *
-     * Consensus = all 3 reviewers have the same decision
+     * Consensus = a majority (2 of 3) reviewers agree on the same decision
      */
     evaluateConsensus(opinions) {
         if (opinions.length !== 3) {
             return { isConsensus: false, decision: "COMMENT" };
         }
-        const decisions = opinions.map((o) => o.decision);
-        const uniqueDecisions = new Set(decisions);
-        if (uniqueDecisions.size === 1) {
-            // All reviewers agree
+        const decisionCounts = opinions.reduce((counts, opinion) => {
+            counts[opinion.decision] += 1;
+            return counts;
+        }, {
+            APPROVE: 0,
+            REQUEST_CHANGES: 0,
+            COMMENT: 0,
+        });
+        const majorityEntry = Object.entries(decisionCounts).find(([, count]) => count >= 2);
+        if (majorityEntry) {
             return {
                 isConsensus: true,
-                decision: decisions[0],
+                decision: majorityEntry[0],
             };
         }
         return { isConsensus: false, decision: "COMMENT" };
     }
     /**
-     * Format reasoning when all reviewers agree
+     * Format reasoning when a consensus is reached
      */
     formatConsensusReasoning(opinions, decision, round) {
         const reasons = opinions.map((o) => `- ${o.reasoning}`).join("\n");
-        return `All 3 reviewers unanimously agree on **${decision}** (Round ${round}):
+        const agreeingReviewers = opinions.filter((o) => o.decision === decision);
+        return `${agreeingReviewers.length} of 3 reviewers agreed on **${decision}** (Round ${round}):
 
 ${reasons}`;
     }
@@ -1473,100 +2154,11 @@ ${reasons}`;
             return a.lineStart - b.lineStart;
         });
     }
-    /**
-     * Build summary comment for PR
-     */
-    buildSummaryComment(decision, reasoning, findings, roundNumber) {
-        const decisionEmoji = this.getDecisionEmoji(decision);
-        const decisionText = this.formatDecision(decision);
-        let comment = `## ${decisionEmoji} Multi-Model Consensus Review: ${decisionText}\n\n`;
-        comment += `### Consensus Process\n`;
-        comment += `- Consensus achieved in **Round ${roundNumber}**\n`;
-        comment += `- Models reviewed: 3 independent reviewers + 1 judge\n`;
-        comment += `- Code findings: ${findings.length} issue(s)\n\n`;
-        comment += `### Judge Reasoning\n${reasoning}\n\n`;
+    normalizeReviewDecision(decision, findings) {
         if (findings.length > 0) {
-            comment += `### Code Issues Found\n`;
-            const bySeverity = this.groupBySeverity(findings);
-            if (bySeverity.critical.length > 0) {
-                comment += `\n🔴 **Critical Issues** (${bySeverity.critical.length})\n`;
-                for (const finding of bySeverity.critical) {
-                    comment += this.formatFinding(finding);
-                }
-            }
-            if (bySeverity.warning.length > 0) {
-                comment += `\n🟡 **Warnings** (${bySeverity.warning.length})\n`;
-                for (const finding of bySeverity.warning) {
-                    comment += this.formatFinding(finding);
-                }
-            }
-            if (bySeverity.info.length > 0) {
-                comment += `\n🔵 **Info** (${bySeverity.info.length})\n`;
-                for (const finding of bySeverity.info) {
-                    comment += this.formatFinding(finding);
-                }
-            }
+            return "REQUEST_CHANGES";
         }
-        else {
-            comment += `### ✅ No Issues Found\n`;
-            comment += `All reviewers agree this code looks good!\n`;
-        }
-        comment += `\n---\n`;
-        comment += `*Reviewed by PR Pilot Review - AI-powered Multi-Model Consensus Review System*\n`;
-        return comment;
-    }
-    /**
-     * Group findings by severity
-     */
-    groupBySeverity(findings) {
-        return {
-            critical: findings.filter((f) => f.severity === "critical"),
-            warning: findings.filter((f) => f.severity === "warning"),
-            info: findings.filter((f) => f.severity === "info"),
-        };
-    }
-    /**
-     * Format a single finding for display
-     */
-    formatFinding(finding) {
-        const lineInfo = finding.lineEnd && finding.lineEnd !== finding.lineStart
-            ? `Lines ${finding.lineStart}-${finding.lineEnd}`
-            : `Line ${finding.lineStart}`;
-        let text = `- **${finding.file}** (${lineInfo}): ${finding.message}\n`;
-        if (finding.suggestion) {
-            text += `  > 💡 Suggestion: ${finding.suggestion}\n`;
-        }
-        return text;
-    }
-    /**
-     * Get emoji for decision
-     */
-    getDecisionEmoji(decision) {
-        switch (decision) {
-            case "APPROVE":
-                return "✅";
-            case "REQUEST_CHANGES":
-                return "❌";
-            case "COMMENT":
-                return "💬";
-            default:
-                return "❓";
-        }
-    }
-    /**
-     * Format decision text
-     */
-    formatDecision(decision) {
-        switch (decision) {
-            case "APPROVE":
-                return "Approved";
-            case "REQUEST_CHANGES":
-                return "Changes Requested";
-            case "COMMENT":
-                return "Comment";
-            default:
-                return "Unknown";
-        }
+        return decision;
     }
 }
 exports.ReviewOrchestrator = ReviewOrchestrator;
@@ -1628,6 +2220,9 @@ const path = __importStar(__nccwpck_require__(6928));
 const logger_js_1 = __nccwpck_require__(8532);
 const STATE_FILE = ".ai-pr-state.json";
 class StateManager {
+    logger;
+    stateFilePath;
+    state;
     constructor(workingDir, debug = false) {
         this.logger = new logger_js_1.Logger(debug);
         this.stateFilePath = path.join(workingDir || process.cwd(), STATE_FILE);
@@ -1742,6 +2337,138 @@ exports.StateManager = StateManager;
 
 /***/ }),
 
+/***/ 9232:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * Formatter utility for converting review output to Markdown
+ *
+ * Handles:
+ * - Format review findings as Markdown
+ * - Format PR review comments
+ * - Format inline code snippets
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.Formatter = void 0;
+class Formatter {
+    /**
+     * Format review findings as a Markdown list
+     */
+    formatFindings(findings) {
+        if (findings.length === 0) {
+            return "No issues found.";
+        }
+        const grouped = this.groupFindingsByFile(findings);
+        let markdown = "";
+        for (const [file, fileFi] of Object.entries(grouped)) {
+            markdown += `\n### 📄 ${file}\n`;
+            for (const finding of fileFi) {
+                const severity = this.formatSeverity(finding.severity);
+                const lineInfo = finding.lineEnd && finding.lineEnd !== finding.lineStart
+                    ? `Lines ${finding.lineStart}-${finding.lineEnd}`
+                    : `Line ${finding.lineStart}`;
+                markdown += `\n${severity} **${lineInfo}**: ${finding.message}`;
+                if (finding.suggestion) {
+                    markdown += `\n> 💡 Suggestion: ${finding.suggestion}`;
+                }
+                markdown += "\n";
+            }
+        }
+        return markdown;
+    }
+    /**
+     * Format review result as PR comment
+     */
+    formatReviewComment(result) {
+        const decisionText = this.formatDecision(result.finalDecision);
+        const tokenCount = result.tokensUsed?.total ?? 0;
+        const findingsText = result.inlineFindings.length === 0
+            ? "No issues found."
+            : result.inlineFindings.length === 1
+                ? "1 issue found."
+                : `${result.inlineFindings.length} issues found.`;
+        return [
+            `# Multi-Model Consensus Review: ${decisionText}`,
+            `## Consensus Process`,
+            `- Consensus Achieved: **Round ${result.consensusRound}**`,
+            `- Models reviewed: Reviewers \`${result.reviewerModels.join(", ")}\` + Judge \`${result.judgeModel}\``,
+            `- API Tokens Used: **${tokenCount}**`,
+            "",
+            findingsText,
+            "---",
+            "*Reviewed by PR Pilot Review - AI-powered Multi-Model Consensus Review System*",
+        ].join("\n");
+    }
+    /**
+     * Group findings by file
+     */
+    groupFindingsByFile(findings) {
+        const grouped = {};
+        for (const finding of findings) {
+            if (!grouped[finding.file]) {
+                grouped[finding.file] = [];
+            }
+            grouped[finding.file].push(finding);
+        }
+        for (const file of Object.keys(grouped)) {
+            grouped[file].sort((a, b) => a.lineStart - b.lineStart);
+        }
+        return grouped;
+    }
+    /**
+     * Get emoji for severity level
+     */
+    formatSeverity(severity) {
+        switch (severity) {
+            case "critical":
+                return "🔴 **CRITICAL**";
+            case "warning":
+                return "🟡 **WARNING**";
+            case "info":
+                return "🔵 **INFO**";
+            default:
+                return "ℹ️";
+        }
+    }
+    /**
+     * Format decision text
+     */
+    formatDecision(decision) {
+        switch (decision) {
+            case "APPROVE":
+                return "Approved";
+            case "REQUEST_CHANGES":
+                return "Request Changes";
+            case "COMMENT":
+                return "Comments on Improvement";
+            default:
+                return "Unknown";
+        }
+    }
+    /**
+     * Format code snippet with line numbers
+     */
+    formatCodeSnippet(code, startLine, context = 2) {
+        const lines = code.split("\n");
+        const start = Math.max(0, startLine - 1 - context);
+        const end = Math.min(lines.length, startLine + context);
+        let snippet = "```\n";
+        for (let i = start; i < end; i++) {
+            const lineNum = i + 1;
+            const marker = lineNum === startLine ? "→ " : "  ";
+            snippet += `${marker}${lineNum.toString().padStart(4, " ")}: ${lines[i]}\n`;
+        }
+        snippet += "```";
+        return snippet;
+    }
+}
+exports.Formatter = Formatter;
+//# sourceMappingURL=formatter.js.map
+
+/***/ }),
+
 /***/ 8532:
 /***/ ((__unused_webpack_module, exports) => {
 
@@ -1752,9 +2479,11 @@ exports.StateManager = StateManager;
  *
  * Provides debug, info, warn, and error logging with optional debug mode
  */
+/* eslint-disable no-console */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.Logger = void 0;
 class Logger {
+    debugMode;
     constructor(debug = false) {
         this.debugMode = debug;
     }

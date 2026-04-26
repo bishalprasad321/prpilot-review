@@ -3,6 +3,7 @@
  *
  * Provides debug, info, warn, and error logging with optional debug mode
  */
+/* eslint-disable no-console */
 
 export class Logger {
   private debugMode: boolean;
