@@ -1343,9 +1343,7 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
         if (this.provider === "groq") {
             const groqResponse = response;
             const text = groqResponse.output
-                ?.map((out) => out.content
-                ?.map((item) => item.text || "")
-                .join(""))
+                ?.map((out) => out.content?.map((item) => item.text || "").join(""))
                 .join("") || "";
             return text.trim();
         }
