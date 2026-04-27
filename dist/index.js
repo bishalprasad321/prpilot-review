@@ -970,7 +970,7 @@ class LLMClient {
         this.baseUrl =
             options.baseUrl ||
                 (this.provider === "groq"
-                    ? "https://api.groq.com/openai/v1/models"
+                    ? "https://api.groq.com/openai/v1"
                     : "https://generativelanguage.googleapis.com/v1beta/models");
     }
     /**
@@ -1243,14 +1243,28 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
      * Call Groq API with retry logic
      */
     async callGroqAPI(model, prompt, _responseSchema, attempt = 1) {
-        const url = `${this.baseUrl}/${model}/generate`;
-        const body = {
-            input: prompt,
-            temperature: 0.7,
-            top_p: 0.95,
-            max_output_tokens: 2048,
-            top_k: 40,
-        };
+        const trimmedBase = this.baseUrl.replace(/\/$/, "");
+        const useOpenAICompat = trimmedBase.includes("/openai/v1");
+        const openAIBase = trimmedBase.replace(/\/models$/, "");
+        const url = useOpenAICompat
+            ? `${openAIBase}/completions`
+            : `${trimmedBase}/${model}/generate`;
+        const body = useOpenAICompat
+            ? {
+                model,
+                prompt,
+                temperature: 0.7,
+                top_p: 0.95,
+                max_tokens: 2048,
+                top_k: 40,
+            }
+            : {
+                input: prompt,
+                temperature: 0.7,
+                top_p: 0.95,
+                max_output_tokens: 2048,
+                top_k: 40,
+            };
         try {
             const response = await (0, node_fetch_1.default)(url, {
                 method: "POST",
@@ -1348,10 +1362,16 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
     extractResponseText(response) {
         if (this.provider === "groq") {
             const groqResponse = response;
-            const text = groqResponse.output
+            const openAIText = groqResponse.choices
+                ?.map((choice) => choice.text || choice.message?.content || "")
+                .join("");
+            if (openAIText) {
+                return openAIText.trim();
+            }
+            const groqText = groqResponse.output
                 ?.map((out) => out.content?.map((item) => item.text || "").join(""))
                 .join("") || "";
-            return text.trim();
+            return groqText.trim();
         }
         const geminiResponse = response;
         const text = geminiResponse.candidates?.[0]?.content?.parts
@@ -1425,7 +1445,10 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
         }
         if (this.provider === "groq") {
             const availableModels = new Set();
-            const url = new URL(this.baseUrl);
+            const trimmedBase = this.baseUrl.replace(/\/$/, "");
+            const url = trimmedBase.endsWith("/models")
+                ? new URL(trimmedBase)
+                : new URL(`${trimmedBase}/models`);
             try {
                 const response = await (0, node_fetch_1.default)(url.toString(), {
                     method: "GET",
