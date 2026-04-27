@@ -38,7 +38,7 @@ Go to your repository:
 If you are using Groq OpenAI-compatible models, set `llm_provider_url` to the Groq OpenAI endpoint:
 
 ```yaml
-llm_provider_url: https://api.groq.com/openai/v1/models
+llm_provider_url: https://api.groq.com/openai/v1
 ```
 
 ### 4. Use the Action
@@ -69,7 +69,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           llm_provider: groq
           llm_api_key: ${{ secrets.GROQ_API_KEY }}
-          llm_provider_url: https://api.groq.com/openai/v1/models
+          llm_provider_url: https://api.groq.com/openai/v1
           # Optional: customize model configuration
           # reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-pro"
           # judge_model: "gemini-2.5-pro"
@@ -89,7 +89,7 @@ with:
   github_token: ${{ secrets.GITHUB_TOKEN }}
   llm_provider: groq
   llm_api_key: ${{ secrets.GROQ_API_KEY }}
-  llm_provider_url: https://api.groq.com/openai/v1/models
+  llm_provider_url: https://api.groq.com/openai/v1
 
   # Optional: Model Configuration
   reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-pro" # 3 models

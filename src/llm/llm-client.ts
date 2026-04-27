@@ -49,6 +49,14 @@ interface GroqResponse {
       text?: string;
     }>;
   }>;
+  choices?: Array<{
+    text?: string;
+    message?: {
+      content?: string;
+    };
+  }>;
+  data?: Array<Record<string, unknown>>;
+  models?: Array<Record<string, unknown>>;
   error?: {
     code?: number | string;
     message?: string;
@@ -143,7 +151,7 @@ export class LLMClient {
     this.baseUrl =
       options.baseUrl ||
       (this.provider === "groq"
-        ? "https://api.groq.com/openai/v1/models"
+        ? "https://api.groq.com/openai/v1"
         : "https://generativelanguage.googleapis.com/v1beta/models");
   }
 
@@ -519,15 +527,29 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
     _responseSchema: Record<string, unknown>,
     attempt: number = 1
   ): Promise<GroqResponse> {
-    const url = `${this.baseUrl}/${model}/generate`;
+    const trimmedBase = this.baseUrl.replace(/\/$/, "");
+    const useOpenAICompat = trimmedBase.includes("/openai/v1");
+    const openAIBase = trimmedBase.replace(/\/models$/, "");
+    const url = useOpenAICompat
+      ? `${openAIBase}/completions`
+      : `${trimmedBase}/${model}/generate`;
 
-    const body = {
-      input: prompt,
-      temperature: 0.7,
-      top_p: 0.95,
-      max_output_tokens: 2048,
-      top_k: 40,
-    };
+    const body = useOpenAICompat
+      ? {
+          model,
+          prompt,
+          temperature: 0.7,
+          top_p: 0.95,
+          max_tokens: 2048,
+          top_k: 40,
+        }
+      : {
+          input: prompt,
+          temperature: 0.7,
+          top_p: 0.95,
+          max_output_tokens: 2048,
+          top_k: 40,
+        };
 
     try {
       const response = await fetch(url, {
@@ -672,11 +694,18 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
   private extractResponseText(response: LLMResponse): string {
     if (this.provider === "groq") {
       const groqResponse = response as GroqResponse;
-      const text =
-        groqResponse.output
-          ?.map((out) => out.content?.map((item) => item.text || "").join(""))
-          .join("") || "";
-      return text.trim();
+      const openAIText = groqResponse.choices
+        ?.map((choice) => choice.text || choice.message?.content || "")
+        .join("");
+
+      if (openAIText) {
+        return openAIText.trim();
+      }
+
+      const groqText = groqResponse.output
+        ?.map((out) => out.content?.map((item) => item.text || "").join(""))
+        .join("") || "";
+      return groqText.trim();
     }
 
     const geminiResponse = response as GeminiResponse;
@@ -789,7 +818,10 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
 
     if (this.provider === "groq") {
       const availableModels = new Set<string>();
-      const url = new URL(this.baseUrl);
+      const trimmedBase = this.baseUrl.replace(/\/$/, "");
+      const url = trimmedBase.endsWith("/models")
+        ? new URL(trimmedBase)
+        : new URL(`${trimmedBase}/models`);
 
       try {
         const response = await fetch(url.toString(), {
