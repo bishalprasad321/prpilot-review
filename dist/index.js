@@ -947,8 +947,12 @@ const FALLBACK_MODELS = {
         ],
     },
     groq: {
-        reviewer: ["groq-1.5-mini", "groq-1.5-small"],
-        judge: ["groq-1.5-small", "groq-1.5-mini"],
+        reviewer: [
+            "llama-3.1-8b-instant",
+            "openai/gpt-oss-20b",
+            "llama-3.3-70b-versatile",
+        ],
+        judge: ["openai/gpt-oss-120b", "llama-3.3-70b-versatile"],
     },
 };
 class LLMClient {
@@ -1247,16 +1251,20 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
         const useOpenAICompat = trimmedBase.includes("/openai/v1");
         const openAIBase = trimmedBase.replace(/\/models$/, "");
         const url = useOpenAICompat
-            ? `${openAIBase}/completions`
+            ? `${openAIBase}/chat/completions`
             : `${trimmedBase}/${model}/generate`;
         const body = useOpenAICompat
             ? {
                 model,
-                prompt,
+                messages: [
+                    {
+                        role: "user",
+                        content: prompt,
+                    },
+                ],
                 temperature: 0.7,
                 top_p: 0.95,
                 max_tokens: 2048,
-                top_k: 40,
             }
             : {
                 input: prompt,

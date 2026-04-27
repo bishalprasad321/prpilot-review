@@ -15,7 +15,7 @@ inputs:
     description: "API key for the chosen LLM provider. Use a provider-specific API key such as GROQ_API_KEY for groq."
     required: false
   llm_provider_url:
-    description: "Optional base URL for the chosen LLM provider. For Groq, use https://api.groq.com/openai/v1 if needed."
+    description: "Optional base URL for the chosen LLM provider. For Groq, use https://api.groq.com/openai/v1 (uses /chat/completions endpoint)."
     required: false
   reviewer_models:
     description: "Comma-separated list of 3 review models. Use provider-specific model IDs such as llama-3.1-8b-instant or openai/gpt-oss-20b."

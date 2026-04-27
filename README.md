@@ -33,13 +33,15 @@ Go to your repository:
 - **Settings** → **Secrets and variables** → **Actions**
 - Add a provider-specific secret, e.g. `GROQ_API_KEY`
 
-### 3. Optional base URL for Groq
+### 3. Optional base URL for Groq OpenAI-compatible API
 
-If you are using Groq OpenAI-compatible models, set `llm_provider_url` to the Groq OpenAI endpoint:
+If you are using Groq's OpenAI-compatible models, set `llm_provider_url` to:
 
 ```yaml
 llm_provider_url: https://api.groq.com/openai/v1
 ```
+
+This will route requests to `https://api.groq.com/openai/v1/chat/completions` for chat-based model inference.
 
 ### 4. Use the Action
 
@@ -103,7 +105,7 @@ with:
   debug: "false" # Verbose logging
 ```
 
-Use stable provider-specific model IDs. For Gemini, use `v1beta` model codes. For Groq, use free-tier model IDs such as `groq-1.5-mini` or `groq-1.5-small`.
+Use stable provider-specific model IDs. For Gemini, use `v1beta` model codes. For Groq, use models like `llama-3.1-8b-instant`, `openai/gpt-oss-20b`, or `llama-3.3-70b-versatile` (check [Groq console](https://console.groq.com/keys) for available models).
 
 ### Groq Example
 
@@ -315,7 +317,7 @@ The free tier has limits:
 If you hit quota errors:
 
 1. **Upgrade to paid plan** — Recommended for production
-2. **Use lighter models** — `gemini-2.5-flash-lite` or `groq-1.5-mini` use fewer tokens
+2. **Use lighter models** — `gemini-2.5-flash-lite` or Groq's smaller models like `llama-3.1-8b-instant` use fewer tokens
 3. **Reduce reviewer count** — Use 2 instead of 3 reviewers
 4. **Schedule reviews** — Spread runs across off-peak hours
 
