@@ -66,11 +66,13 @@ async function main() {
 
     const llmProviderInput = core.getInput("llm_provider") || "groq";
     const llmApiKeyInput = core.getInput("llm_api_key");
+    const llmProviderUrlInput = core.getInput("llm_provider_url");
 
     const config: ActionConfig = {
       githubToken: core.getInput("github_token"),
       llmProvider: llmProviderInput as ActionConfig["llmProvider"],
       llmApiKey: llmApiKeyInput,
+      llmProviderUrl: llmProviderUrlInput || undefined,
       reviewerModels: (
         core.getInput("reviewer_models") || DEFAULT_REVIEWER_MODELS.join(",")
       )
@@ -99,6 +101,9 @@ async function main() {
 
     logger.success("✓ Inputs validated");
     logger.info(`  - LLM Provider: ${config.llmProvider}`);
+    if (config.llmProviderUrl) {
+      logger.info(`  - LLM Provider URL: ${config.llmProviderUrl}`);
+    }
     logger.info(`  - Reviewer Models: ${config.reviewerModels.join(", ")}`);
     logger.info(`  - Judge Model: ${config.judgeModel}`);
     logger.info(`  - Max Consensus Rounds: ${config.maxConsensusRounds}`);
@@ -275,6 +280,7 @@ async function main() {
       maxConsensusRounds: config.maxConsensusRounds,
       debug: config.debug,
       provider: config.llmProvider,
+      providerUrl: config.llmProviderUrl,
     });
 
     const reviewResult = await orchestrator.runConsensusReview(llmContext);

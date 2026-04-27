@@ -161,6 +161,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           llm_provider: groq
           llm_api_key: ${{ secrets.GROQ_API_KEY }}
+          llm_provider_url: https://api.groq.com/openai/v1/models
           reviewer_models: ${{ steps.model_config.outputs.reviewer_models }}
           judge_model: ${{ steps.model_config.outputs.judge_model }}
           max_consensus_rounds: "3"

@@ -662,10 +662,12 @@ async function main() {
         logger.step(1, "Parsing inputs from action.yml");
         const llmProviderInput = core.getInput("llm_provider") || "groq";
         const llmApiKeyInput = core.getInput("llm_api_key");
+        const llmProviderUrlInput = core.getInput("llm_provider_url");
         const config = {
             githubToken: core.getInput("github_token"),
             llmProvider: llmProviderInput,
             llmApiKey: llmApiKeyInput,
+            llmProviderUrl: llmProviderUrlInput || undefined,
             reviewerModels: (core.getInput("reviewer_models") || DEFAULT_REVIEWER_MODELS.join(","))
                 .split(",")
                 .map((m) => m.trim()),
@@ -685,6 +687,9 @@ async function main() {
         }
         logger.success("✓ Inputs validated");
         logger.info(`  - LLM Provider: ${config.llmProvider}`);
+        if (config.llmProviderUrl) {
+            logger.info(`  - LLM Provider URL: ${config.llmProviderUrl}`);
+        }
         logger.info(`  - Reviewer Models: ${config.reviewerModels.join(", ")}`);
         logger.info(`  - Judge Model: ${config.judgeModel}`);
         logger.info(`  - Max Consensus Rounds: ${config.maxConsensusRounds}`);
@@ -804,6 +809,7 @@ async function main() {
             maxConsensusRounds: config.maxConsensusRounds,
             debug: config.debug,
             provider: config.llmProvider,
+            providerUrl: config.llmProviderUrl,
         });
         const reviewResult = await orchestrator.runConsensusReview(llmContext);
         logger.success("✓ Consensus review complete");
@@ -964,7 +970,7 @@ class LLMClient {
         this.baseUrl =
             options.baseUrl ||
                 (this.provider === "groq"
-                    ? "https://api.groq.com/v1/models"
+                    ? "https://api.groq.com/openai/v1/models"
                     : "https://generativelanguage.googleapis.com/v1beta/models");
     }
     /**
@@ -1418,12 +1424,49 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
             return this.availableGenerateContentModels;
         }
         if (this.provider === "groq") {
-            const availableModels = new Set([
-                ...FALLBACK_MODELS.groq.reviewer,
-                ...FALLBACK_MODELS.groq.judge,
-            ]);
-            this.availableGenerateContentModels = availableModels;
-            return availableModels;
+            const availableModels = new Set();
+            const url = new URL(this.baseUrl);
+            try {
+                const response = await (0, node_fetch_1.default)(url.toString(), {
+                    method: "GET",
+                    headers: {
+                        "Content-Type": "application/json",
+                        Authorization: `Bearer ${this.apiKey}`,
+                    },
+                });
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({}));
+                    throw new LLMApiError(response.status, `Groq model list error: ${response.status} - ${errorData.error?.message || "Unknown error"}`);
+                }
+                const data = (await response.json());
+                const models = Array.isArray(data.data)
+                    ? data.data
+                    : Array.isArray(data.models)
+                        ? data.models
+                        : [];
+                for (const model of models) {
+                    const modelName = this.normalizeModelName(String(model.id || model.name || model.model || ""));
+                    if (modelName) {
+                        availableModels.add(modelName);
+                    }
+                }
+                if (availableModels.size === 0) {
+                    this.logger.warn("Could not parse Groq model list response. Falling back to known Groq models.");
+                    FALLBACK_MODELS.groq.reviewer.forEach((model) => availableModels.add(model));
+                    FALLBACK_MODELS.groq.judge.forEach((model) => availableModels.add(model));
+                }
+                this.availableGenerateContentModels = availableModels;
+                return availableModels;
+            }
+            catch (error) {
+                this.logger.warn(`Could not fetch Groq model list from ${url.toString()}: ${error instanceof Error ? error.message : String(error)}`);
+                const fallbackModels = new Set([
+                    ...FALLBACK_MODELS.groq.reviewer,
+                    ...FALLBACK_MODELS.groq.judge,
+                ]);
+                this.availableGenerateContentModels = fallbackModels;
+                return fallbackModels;
+            }
         }
         const availableModels = new Set();
         let pageToken;
@@ -2041,6 +2084,7 @@ class ReviewOrchestrator {
         this.llmClient = new llm_client_js_1.LLMClient(apiKey, {
             debug: options.debug,
             provider: options.provider,
+            baseUrl: options.providerUrl,
         });
         this.logger = new logger_js_1.Logger(options.debug);
         this.reviewerModels = options.reviewerModels;

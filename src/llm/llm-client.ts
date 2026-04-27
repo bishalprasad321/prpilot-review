@@ -143,7 +143,7 @@ export class LLMClient {
     this.baseUrl =
       options.baseUrl ||
       (this.provider === "groq"
-        ? "https://api.groq.com/v1/models"
+        ? "https://api.groq.com/openai/v1/models"
         : "https://generativelanguage.googleapis.com/v1beta/models");
   }
 
@@ -788,12 +788,68 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
     }
 
     if (this.provider === "groq") {
-      const availableModels = new Set<string>([
-        ...FALLBACK_MODELS.groq.reviewer,
-        ...FALLBACK_MODELS.groq.judge,
-      ]);
-      this.availableGenerateContentModels = availableModels;
-      return availableModels;
+      const availableModels = new Set<string>();
+      const url = new URL(this.baseUrl);
+
+      try {
+        const response = await fetch(url.toString(), {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${this.apiKey}`,
+          },
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new LLMApiError(
+            response.status,
+            `Groq model list error: ${response.status} - ${(errorData as any).error?.message || "Unknown error"}`
+          );
+        }
+
+        const data = (await response.json()) as Record<string, unknown>;
+
+        const models = Array.isArray(data.data)
+          ? (data.data as Array<Record<string, unknown>>)
+          : Array.isArray(data.models)
+          ? (data.models as Array<Record<string, unknown>>)
+          : [];
+
+        for (const model of models) {
+          const modelName = this.normalizeModelName(
+            String(model.id || model.name || model.model || "")
+          );
+          if (modelName) {
+            availableModels.add(modelName);
+          }
+        }
+
+        if (availableModels.size === 0) {
+          this.logger.warn(
+            "Could not parse Groq model list response. Falling back to known Groq models."
+          );
+          FALLBACK_MODELS.groq.reviewer.forEach((model) =>
+            availableModels.add(model)
+          );
+          FALLBACK_MODELS.groq.judge.forEach((model) => availableModels.add(model));
+        }
+
+        this.availableGenerateContentModels = availableModels;
+        return availableModels;
+      } catch (error) {
+        this.logger.warn(
+          `Could not fetch Groq model list from ${url.toString()}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+        const fallbackModels = new Set<string>([
+          ...FALLBACK_MODELS.groq.reviewer,
+          ...FALLBACK_MODELS.groq.judge,
+        ]);
+        this.availableGenerateContentModels = fallbackModels;
+        return fallbackModels;
+      }
     }
 
     const availableModels = new Set<string>();

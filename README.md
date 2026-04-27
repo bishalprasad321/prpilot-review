@@ -33,7 +33,15 @@ Go to your repository:
 - **Settings** → **Secrets and variables** → **Actions**
 - Add a provider-specific secret, e.g. `GROQ_API_KEY`
 
-### 3. Use the Action
+### 3. Optional base URL for Groq
+
+If you are using Groq OpenAI-compatible models, set `llm_provider_url` to the Groq OpenAI endpoint:
+
+```yaml
+llm_provider_url: https://api.groq.com/openai/v1/models
+```
+
+### 4. Use the Action
 
 Create `.github/workflows/ai-review.yml`:
 
@@ -61,6 +69,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           llm_provider: groq
           llm_api_key: ${{ secrets.GROQ_API_KEY }}
+          llm_provider_url: https://api.groq.com/openai/v1/models
           # Optional: customize model configuration
           # reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-pro"
           # judge_model: "gemini-2.5-pro"
@@ -80,6 +89,7 @@ with:
   github_token: ${{ secrets.GITHUB_TOKEN }}
   llm_provider: groq
   llm_api_key: ${{ secrets.GROQ_API_KEY }}
+  llm_provider_url: https://api.groq.com/openai/v1/models
 
   # Optional: Model Configuration
   reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-pro" # 3 models

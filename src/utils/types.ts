@@ -183,6 +183,7 @@ export interface ActionConfig {
   githubToken: string;
   llmProvider: LLMProvider;
   llmApiKey: string;
+  llmProviderUrl?: string;
   reviewerModels: string[];
   judgeModel: string;
   maxConsensusRounds: number;

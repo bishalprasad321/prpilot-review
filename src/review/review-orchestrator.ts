@@ -28,6 +28,7 @@ interface OrchestratorOptions {
   maxConsensusRounds: number;
   debug?: boolean;
   provider?: LLMProvider;
+  providerUrl?: string;
 }
 
 export class ReviewOrchestrator {
@@ -42,6 +43,7 @@ export class ReviewOrchestrator {
     this.llmClient = new LLMClient(apiKey, {
       debug: options.debug,
       provider: options.provider,
+      baseUrl: options.providerUrl,
     });
     this.logger = new Logger(options.debug);
     this.reviewerModels = options.reviewerModels;
