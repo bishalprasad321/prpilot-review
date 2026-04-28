@@ -1370,16 +1370,27 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
     extractResponseText(response) {
         if (this.provider === "groq") {
             const groqResponse = response;
-            const openAIText = groqResponse.choices
-                ?.map((choice) => choice.text || choice.message?.content || "")
-                .join("");
-            if (openAIText) {
-                return openAIText.trim();
+            // Try OpenAI-compatible chat/completions format first
+            if (groqResponse.choices && Array.isArray(groqResponse.choices)) {
+                const openAIText = groqResponse.choices
+                    .map((choice) => choice.text || choice.message?.content || "")
+                    .join("")
+                    .trim();
+                if (openAIText) {
+                    return openAIText;
+                }
             }
-            const groqText = groqResponse.output
-                ?.map((out) => out.content?.map((item) => item.text || "").join(""))
-                .join("") || "";
-            return groqText.trim();
+            // Fallback to legacy Groq format
+            if (groqResponse.output && Array.isArray(groqResponse.output)) {
+                const groqText = groqResponse.output
+                    .map((out) => out.content?.map((item) => item.text || "").join(""))
+                    .join("")
+                    .trim();
+                if (groqText) {
+                    return groqText;
+                }
+            }
+            return "";
         }
         const geminiResponse = response;
         const text = geminiResponse.candidates?.[0]?.content?.parts
@@ -2167,8 +2178,8 @@ class ReviewOrchestrator {
                 allRounds.push(round_data);
                 break; // Exit loop, consensus achieved
             }
-            // Step 3: Opinions differ - call judge model
-            this.logger.warn(`❌ No consensus yet. Reviewers differ:${opinions
+            // Step 3: Opinions differ - call judge model to guide next round
+            this.logger.warn(`❌ No full consensus yet. Reviewers differ:${opinions
                 .map((o) => ` ${o.reviewerId}:${o.decision}`)
                 .join(",")}`);
             const judgeDecision = await this.llmClient.callJudgeModel(this.judgeModel, opinions, context, round);
@@ -2181,19 +2192,41 @@ class ReviewOrchestrator {
                 needsRetry: round < this.maxConsensusRounds,
             };
             allRounds.push(round_data);
-            // If this is the last round or judge is confident, use judge's decision
-            if (round === this.maxConsensusRounds || judgeDecision.confidence > 0.8) {
-                finalDecision = judgeDecision.decision;
-                finalReasoning = judgeDecision.reasoning;
-                if (round === this.maxConsensusRounds) {
-                    this.logger.warn(`⚠️ Max consensus rounds reached. Using judge's final decision.`);
+            // If this is the last round, use fallback strategy
+            if (round === this.maxConsensusRounds) {
+                this.logger.warn(`⚠️ Max consensus rounds reached. Applying fallback decision strategy...`);
+                // First, check if we can use judge's decision if confident
+                if (judgeDecision.confidence > 0.8) {
+                    finalDecision = judgeDecision.decision;
+                    finalReasoning = judgeDecision.reasoning;
+                    this.logger.success(`✅ Using judge's high-confidence final decision: ${judgeDecision.decision}`);
                 }
                 else {
-                    this.logger.success(`✅ Judge achieved high-confidence consensus in round ${round}`);
+                    // Otherwise, fall back to majority consensus among reviewers
+                    const majority = this.evaluateMajorityConsensus(opinions);
+                    if (majority.hasMajority) {
+                        finalDecision = majority.decision;
+                        const agreeingReviewers = opinions.filter((o) => o.decision === majority.decision);
+                        finalReasoning = `${agreeingReviewers.length} of 3 reviewers agreed on **${majority.decision}** after ${round} rounds (fallback to majority)`;
+                        this.logger.success(`✅ Using majority consensus on final round: ${majority.decision}`);
+                    }
+                    else {
+                        // Last resort: use judge's decision
+                        finalDecision = judgeDecision.decision;
+                        finalReasoning = judgeDecision.reasoning;
+                        this.logger.warn(`⚠️ No majority found. Using judge's decision as final fallback: ${judgeDecision.decision}`);
+                    }
                 }
                 break;
             }
-            this.logger.warn(`⏳ Low judge confidence (${(judgeDecision.confidence * 100).toFixed(0)}%). Requesting another review round...`);
+            // Before final round: only stop if judge is very confident
+            if (judgeDecision.confidence > 0.9) {
+                finalDecision = judgeDecision.decision;
+                finalReasoning = judgeDecision.reasoning;
+                this.logger.success(`✅ Judge achieved very high-confidence consensus in round ${round}: ${judgeDecision.decision}`);
+                break;
+            }
+            this.logger.warn(`⏳ Judge confidence is ${(judgeDecision.confidence * 100).toFixed(0)}%. Requesting another review round to reach consensus...`);
         }
         // Step 4: Consolidate findings
         const inlineFindings = this.consolidateFindings(allOpinions);
@@ -2254,11 +2287,32 @@ class ReviewOrchestrator {
     /**
      * Evaluate if consensus is achieved
      *
-     * Consensus = a majority (2 of 3) reviewers agree on the same decision
+     * Consensus = ALL 3 reviewers agree on the same decision (unanimous).
+     * This ensures reviewers are truly on the same page before concluding.
      */
     evaluateConsensus(opinions) {
         if (opinions.length !== 3) {
             return { isConsensus: false, decision: "COMMENT" };
+        }
+        // Check if all 3 reviewers have the same decision
+        const firstDecision = opinions[0].decision;
+        const allAgree = opinions.every((o) => o.decision === firstDecision);
+        if (allAgree) {
+            return {
+                isConsensus: true,
+                decision: firstDecision,
+            };
+        }
+        return { isConsensus: false, decision: "COMMENT" };
+    }
+    /**
+     * Evaluate if a majority consensus is reached (fallback for final round)
+     *
+     * Majority = 2 of 3 reviewers agree on the same decision
+     */
+    evaluateMajorityConsensus(opinions) {
+        if (opinions.length !== 3) {
+            return { hasMajority: false, decision: "COMMENT" };
         }
         const decisionCounts = opinions.reduce((counts, opinion) => {
             counts[opinion.decision] += 1;
@@ -2271,11 +2325,11 @@ class ReviewOrchestrator {
         const majorityEntry = Object.entries(decisionCounts).find(([, count]) => count >= 2);
         if (majorityEntry) {
             return {
-                isConsensus: true,
+                hasMajority: true,
                 decision: majorityEntry[0],
             };
         }
-        return { isConsensus: false, decision: "COMMENT" };
+        return { hasMajority: false, decision: "COMMENT" };
     }
     /**
      * Format reasoning when a consensus is reached

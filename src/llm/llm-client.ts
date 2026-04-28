@@ -702,18 +702,29 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
   private extractResponseText(response: LLMResponse): string {
     if (this.provider === "groq") {
       const groqResponse = response as GroqResponse;
-      const openAIText = groqResponse.choices
-        ?.map((choice) => choice.text || choice.message?.content || "")
-        .join("");
-
-      if (openAIText) {
-        return openAIText.trim();
+      // Try OpenAI-compatible chat/completions format first
+      if (groqResponse.choices && Array.isArray(groqResponse.choices)) {
+        const openAIText = groqResponse.choices
+          .map((choice) => choice.text || choice.message?.content || "")
+          .join("")
+          .trim();
+        if (openAIText) {
+          return openAIText;
+        }
       }
 
-      const groqText = groqResponse.output
-        ?.map((out) => out.content?.map((item) => item.text || "").join(""))
-        .join("") || "";
-      return groqText.trim();
+      // Fallback to legacy Groq format
+      if (groqResponse.output && Array.isArray(groqResponse.output)) {
+        const groqText = groqResponse.output
+          .map((out) => out.content?.map((item) => item.text || "").join(""))
+          .join("")
+          .trim();
+        if (groqText) {
+          return groqText;
+        }
+      }
+
+      return "";
     }
 
     const geminiResponse = response as GeminiResponse;
@@ -853,8 +864,8 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
         const models = Array.isArray(data.data)
           ? (data.data as Array<Record<string, unknown>>)
           : Array.isArray(data.models)
-          ? (data.models as Array<Record<string, unknown>>)
-          : [];
+            ? (data.models as Array<Record<string, unknown>>)
+            : [];
 
         for (const model of models) {
           const modelName = this.normalizeModelName(
@@ -872,7 +883,9 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
           FALLBACK_MODELS.groq.reviewer.forEach((model) =>
             availableModels.add(model)
           );
-          FALLBACK_MODELS.groq.judge.forEach((model) => availableModels.add(model));
+          FALLBACK_MODELS.groq.judge.forEach((model) =>
+            availableModels.add(model)
+          );
         }
 
         this.availableGenerateContentModels = availableModels;
