@@ -844,7 +844,7 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
           const errorData = await response.json().catch(() => ({}));
           throw new LLMApiError(
             response.status,
-            `Groq model list error: ${response.status} - ${(errorData as any).error?.message || "Unknown error"}`
+            `Groq model list error: ${response.status} - ${(errorData as { error?: { message?: string } }).error?.message || "Unknown error"}`
           );
         }
 
