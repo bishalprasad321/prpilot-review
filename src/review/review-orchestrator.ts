@@ -14,6 +14,7 @@ import { LLMClient } from "../llm/llm-client.js";
 import { Formatter } from "../utils/formatter.js";
 import {
   LLMContext,
+  LLMProvider,
   ReviewerOpinion,
   ConsensusRound,
   ReviewResult,
@@ -26,6 +27,8 @@ interface OrchestratorOptions {
   judgeModel: string;
   maxConsensusRounds: number;
   debug?: boolean;
+  provider?: LLMProvider;
+  providerUrl?: string;
 }
 
 export class ReviewOrchestrator {
@@ -37,7 +40,11 @@ export class ReviewOrchestrator {
   private formatter: Formatter;
 
   constructor(apiKey: string, options: OrchestratorOptions) {
-    this.llmClient = new LLMClient(apiKey, { debug: options.debug });
+    this.llmClient = new LLMClient(apiKey, {
+      debug: options.debug,
+      provider: options.provider,
+      baseUrl: options.providerUrl,
+    });
     this.logger = new Logger(options.debug);
     this.reviewerModels = options.reviewerModels;
     this.judgeModel = options.judgeModel;
@@ -105,9 +112,9 @@ export class ReviewOrchestrator {
         break; // Exit loop, consensus achieved
       }
 
-      // Step 3: Opinions differ - call judge model
+      // Step 3: Opinions differ - call judge model to guide next round
       this.logger.warn(
-        `❌ No consensus yet. Reviewers differ:${opinions
+        `❌ No full consensus yet. Reviewers differ:${opinions
           .map((o) => ` ${o.reviewerId}:${o.decision}`)
           .join(",")}`
       );
@@ -132,26 +139,55 @@ export class ReviewOrchestrator {
       };
       allRounds.push(round_data);
 
-      // If this is the last round or judge is confident, use judge's decision
-      if (round === this.maxConsensusRounds || judgeDecision.confidence > 0.8) {
-        finalDecision = judgeDecision.decision;
-        finalReasoning = judgeDecision.reasoning;
+      // If this is the last round, use fallback strategy
+      if (round === this.maxConsensusRounds) {
+        this.logger.warn(
+          `⚠️ Max consensus rounds reached. Applying fallback decision strategy...`
+        );
 
-        if (round === this.maxConsensusRounds) {
-          this.logger.warn(
-            `⚠️ Max consensus rounds reached. Using judge's final decision.`
+        // First, check if we can use judge's decision if confident
+        if (judgeDecision.confidence > 0.8) {
+          finalDecision = judgeDecision.decision;
+          finalReasoning = judgeDecision.reasoning;
+          this.logger.success(
+            `✅ Using judge's high-confidence final decision: ${judgeDecision.decision}`
           );
         } else {
-          this.logger.success(
-            `✅ Judge achieved high-confidence consensus in round ${round}`
-          );
+          // Otherwise, fall back to majority consensus among reviewers
+          const majority = this.evaluateMajorityConsensus(opinions);
+          if (majority.hasMajority) {
+            finalDecision = majority.decision;
+            const agreeingReviewers = opinions.filter(
+              (o) => o.decision === majority.decision
+            );
+            finalReasoning = `${agreeingReviewers.length} of 3 reviewers agreed on **${majority.decision}** after ${round} rounds (fallback to majority)`;
+            this.logger.success(
+              `✅ Using majority consensus on final round: ${majority.decision}`
+            );
+          } else {
+            // Last resort: use judge's decision
+            finalDecision = judgeDecision.decision;
+            finalReasoning = judgeDecision.reasoning;
+            this.logger.warn(
+              `⚠️ No majority found. Using judge's decision as final fallback: ${judgeDecision.decision}`
+            );
+          }
         }
+        break;
+      }
 
+      // Before final round: only stop if judge is very confident
+      if (judgeDecision.confidence > 0.9) {
+        finalDecision = judgeDecision.decision;
+        finalReasoning = judgeDecision.reasoning;
+        this.logger.success(
+          `✅ Judge achieved very high-confidence consensus in round ${round}: ${judgeDecision.decision}`
+        );
         break;
       }
 
       this.logger.warn(
-        `⏳ Low judge confidence (${(judgeDecision.confidence * 100).toFixed(0)}%). Requesting another review round...`
+        `⏳ Judge confidence is ${(judgeDecision.confidence * 100).toFixed(0)}%. Requesting another review round to reach consensus...`
       );
     }
 
@@ -239,7 +275,8 @@ export class ReviewOrchestrator {
   /**
    * Evaluate if consensus is achieved
    *
-   * Consensus = a majority (2 of 3) reviewers agree on the same decision
+   * Consensus = ALL 3 reviewers agree on the same decision (unanimous).
+   * This ensures reviewers are truly on the same page before concluding.
    */
   private evaluateConsensus(opinions: ReviewerOpinion[]): {
     isConsensus: boolean;
@@ -247,6 +284,33 @@ export class ReviewOrchestrator {
   } {
     if (opinions.length !== 3) {
       return { isConsensus: false, decision: "COMMENT" };
+    }
+
+    // Check if all 3 reviewers have the same decision
+    const firstDecision = opinions[0].decision;
+    const allAgree = opinions.every((o) => o.decision === firstDecision);
+
+    if (allAgree) {
+      return {
+        isConsensus: true,
+        decision: firstDecision,
+      };
+    }
+
+    return { isConsensus: false, decision: "COMMENT" };
+  }
+
+  /**
+   * Evaluate if a majority consensus is reached (fallback for final round)
+   *
+   * Majority = 2 of 3 reviewers agree on the same decision
+   */
+  private evaluateMajorityConsensus(opinions: ReviewerOpinion[]): {
+    hasMajority: boolean;
+    decision: ReviewDecision;
+  } {
+    if (opinions.length !== 3) {
+      return { hasMajority: false, decision: "COMMENT" };
     }
 
     const decisionCounts = opinions.reduce<Record<ReviewDecision, number>>(
@@ -267,12 +331,12 @@ export class ReviewOrchestrator {
 
     if (majorityEntry) {
       return {
-        isConsensus: true,
+        hasMajority: true,
         decision: majorityEntry[0] as ReviewDecision,
       };
     }
 
-    return { isConsensus: false, decision: "COMMENT" };
+    return { hasMajority: false, decision: "COMMENT" };
   }
 
   /**

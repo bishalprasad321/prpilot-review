@@ -37,7 +37,7 @@ jobs:
   # ============================================================================
   # First, generate an AI-powered PR description using prpilot-summary.
   # This provides context for the multi-model consensus review.
-  # Requires secrets: GEMINI_API_KEY
+  # Requires secrets: GROQ_API_KEY
   # ============================================================================
   generate-description:
     name: "Step 1: Generate PR Description"
@@ -52,10 +52,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Check if GEMINI_API_KEY exists
+      - name: Check if LLM API key exists
         id: check_secrets
         run: |
-          if [ -z "${{ secrets.GEMINI_API_KEY }}" ]; then
+          if [ -z "${{ secrets.GROQ_API_KEY }}" ]; then
             echo "has_key=false" >> $GITHUB_OUTPUT
           else
             echo "has_key=true" >> $GITHUB_OUTPUT
@@ -67,9 +67,9 @@ jobs:
         uses: bishalprasad321/prpilot-summary@v1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          llm_api_key: ${{ secrets.GEMINI_API_KEY }}
-          llm_provider: gemini
-          ai_model: gemini-2.5-flash
+          llm_api_key: ${{ secrets.GROQ_API_KEY }}
+          llm_provider: groq
+          ai_model: groq-1.5-mini
           max_diff_lines: "5000"
           enable_incremental_diff_processing: "true"
           debug: ${{ inputs.debug_enabled || 'false' }}
@@ -89,7 +89,7 @@ jobs:
           else
             echo "⚠️ Description generation encountered an error"
             echo "This may be expected if:"
-            echo "  - Secrets are not configured (GEMINI_API_KEY missing)"
+            echo "  - Secrets are not configured (GROQ_API_KEY missing)"
             echo "  - No meaningful changes in the PR"
             echo "  - LLM API is temporarily unavailable"
           fi
@@ -100,7 +100,7 @@ jobs:
   # ============================================================================
   # Run multi-model consensus review after description is generated.
   # This calls 3 independent reviewer models + 1 judge model for consensus.
-  # Requires secrets: GEMINI_API_KEY
+  # Requires secrets: GROQ_API_KEY
   # Outputs: Decision (APPROVE/REQUEST_CHANGES/COMMENT), findings, round count
   # ============================================================================
   consensus-review:
@@ -123,31 +123,31 @@ jobs:
           PRESET="${{ inputs.model_preset || 'default' }}"
           case $PRESET in
             high-capability)
-              echo "reviewer_models=gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite" >> $GITHUB_OUTPUT
-              echo "judge_model=gemini-2.5-pro" >> $GITHUB_OUTPUT
-              echo "preset_name=High Capability (Best Quality)" >> $GITHUB_OUTPUT
+              echo "reviewer_models=llama-3.3-70b-versatile,openai/gpt-oss-120b,openai/gpt-oss-20b" >> $GITHUB_OUTPUT
+              echo "judge_model=openai/gpt-oss-120b" >> $GITHUB_OUTPUT
+              echo "preset_name=Groq Maximum Quality" >> $GITHUB_OUTPUT
               ;;
             cost-optimized)
-              echo "reviewer_models=gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-flash-lite" >> $GITHUB_OUTPUT
-              echo "judge_model=gemini-2.5-flash" >> $GITHUB_OUTPUT
-              echo "preset_name=Cost Optimized (Lower Cost)" >> $GITHUB_OUTPUT
+              echo "reviewer_models=llama-3.1-8b-instant,openai/gpt-oss-20b,openai/gpt-oss-20b" >> $GITHUB_OUTPUT
+              echo "judge_model=openai/gpt-oss-120b" >> $GITHUB_OUTPUT
+              echo "preset_name=Groq Maximum Speed" >> $GITHUB_OUTPUT
               ;;
             quality-optimized)
-              echo "reviewer_models=gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite" >> $GITHUB_OUTPUT
-              echo "judge_model=gemini-2.5-pro" >> $GITHUB_OUTPUT
-              echo "preset_name=Quality Optimized (Best Findings)" >> $GITHUB_OUTPUT
+              echo "reviewer_models=llama-3.3-70b-versatile,openai/gpt-oss-120b,openai/gpt-oss-20b" >> $GITHUB_OUTPUT
+              echo "judge_model=openai/gpt-oss-120b" >> $GITHUB_OUTPUT
+              echo "preset_name=Groq Maximum Quality" >> $GITHUB_OUTPUT
               ;;
             *)
-              echo "reviewer_models=gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-pro" >> $GITHUB_OUTPUT
-              echo "judge_model=gemini-2.5-pro" >> $GITHUB_OUTPUT
-              echo "preset_name=Default (Balanced)" >> $GITHUB_OUTPUT
+              echo "reviewer_models=llama-3.1-8b-instant,openai/gpt-oss-20b,llama-3.3-70b-versatile" >> $GITHUB_OUTPUT
+              echo "judge_model=openai/gpt-oss-120b" >> $GITHUB_OUTPUT
+              echo "preset_name=Groq Default Production" >> $GITHUB_OUTPUT
               ;;
           esac
 
-      - name: Check if GEMINI_API_KEY exists
+      - name: Check if LLM API key exists
         id: check_secrets
         run: |
-          if [ -z "${{ secrets.GEMINI_API_KEY }}" ]; then
+          if [ -z "${{ secrets.GROQ_API_KEY }}" ]; then
             echo "has_key=false" >> $GITHUB_OUTPUT
           else
             echo "has_key=true" >> $GITHUB_OUTPUT
@@ -159,7 +159,9 @@ jobs:
         uses: ./
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          llm_provider: groq
+          llm_api_key: ${{ secrets.GROQ_API_KEY }}
+          llm_provider_url: https://api.groq.com/openai/v1
           reviewer_models: ${{ steps.model_config.outputs.reviewer_models }}
           judge_model: ${{ steps.model_config.outputs.judge_model }}
           max_consensus_rounds: "3"
@@ -198,8 +200,8 @@ jobs:
           else
             echo "⚠️ Consensus review encountered an error"
             echo "This may be expected if:"
-            echo "  - Secrets are not configured (GEMINI_API_KEY missing)"
-            echo "  - Selected models are not valid Gemini v1beta model codes"
+            echo "  - Secrets are not configured (GROQ_API_KEY missing)"
+            echo "  - Selected models are not valid for the current provider"
             echo "  - API quota exceeded (check API key billing settings)"
             echo "  - Reviewer/judge models not available"
             echo "  - LLM API is temporarily unavailable"

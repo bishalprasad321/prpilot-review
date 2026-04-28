@@ -1,9 +1,9 @@
-# ADR-002: Gemini API Integration & Model Selection
+# ADR-002: LLM Provider Integration & Model Selection
 
 **Status:** Accepted  
 **Date:** 2026-04-23  
 **Deciders:** Bishal Prasad  
-**Affects:** LLM integration, model performance, API costs
+**Affects:** LLM integration, provider selection, model performance, API costs
 
 ## Context
 
@@ -24,23 +24,23 @@ The PR Pilot Review system needed to choose:
 
 ## Decision
 
-**Provider:** Google Gemini API (v1beta)  
+**Provider:** Gemini or Groq (provider configured via `llm_provider`)  
 **Approach:** Fetch-based HTTP client with structured outputs and runtime model validation  
 **Model Configuration:**
 
 - Reviewers: `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-2.5-pro`
 - Judge: `gemini-2.5-pro`
 
-### Why Gemini?
+### Why Gemini or Groq?
 
-| Criteria       | Gemini          | OpenAI  | Claude  | Reason                    |
-| -------------- | --------------- | ------- | ------- | ------------------------- |
-| Free tier      | ✅ Yes          | ❌ No   | ❌ No   | Cost critical for OSS     |
-| JSON output    | ✅ Yes          | ✅ Yes  | ✅ Yes  | All equal                 |
-| v1beta API     | ✅ Yes          | ✅ Yes  | ✅ Yes  | All available             |
-| Speed          | ✅ Flash models | ✅ Fast | ✅ Fast | Gemini flash is very fast |
-| Parallel calls | ✅ Yes          | ✅ Yes  | ✅ Yes  | All support it            |
-| **Chosen**     | ✅              | ✗       | ✗       |                           |
+| Criteria       | Gemini          | Groq    | OpenAI  | Claude  | Reason                   |
+| -------------- | --------------- | ------- | ------- | ------- | ------------------------ |
+| Free tier      | ✅ Yes          | ✅ Yes  | ❌ No   | ❌ No   | Cost critical for OSS    |
+| JSON output    | ✅ Yes          | ✅ Yes  | ✅ Yes  | ✅ Yes  | All equal                |
+| API support    | ✅ v1beta       | ✅ v1   | ✅ Fast | ✅ Fast | Both providers available |
+| Speed          | ✅ Flash models | ✅ Mini | ✅ Fast | ✅ Fast | Both support fast models |
+| Parallel calls | ✅ Yes          | ✅ Yes  | ✅ Yes  | ✅ Yes  | All support it           |
+| **Chosen**     | ✅              | ✅      | ✗       | ✗       |                          |
 
 ### Why These Models?
 
@@ -202,7 +202,7 @@ for (let attempt = 1; attempt <= maxRetries; attempt++) {
 ### 401 Errors (Invalid Key)
 
 ```
-❌ Unauthorized: Check GEMINI_API_KEY secret
+❌ Unauthorized: Check the configured LLM provider API key
 ```
 
 → Throws error (fails workflow step)
@@ -255,8 +255,8 @@ npm test -- llm-client.test.ts
 ### Integration Tests
 
 ```bash
-# Test actual API calls (requires GEMINI_API_KEY)
-GEMINI_API_KEY=... npm test -- --integration
+# Test actual API calls (requires a provider-specific LLM API key)
+GROQ_API_KEY=... npm test -- --integration
 ```
 
 ### Manual Testing

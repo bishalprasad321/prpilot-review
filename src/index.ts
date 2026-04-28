@@ -37,11 +37,11 @@ interface GitHubEventPayload {
 
 const logger = new Logger();
 const DEFAULT_REVIEWER_MODELS = [
-  "gemini-2.5-flash",
-  "gemini-2.5-flash-lite",
-  "gemini-2.5-pro",
+  "llama-3.1-8b-instant",
+  "openai/gpt-oss-20b",
+  "llama-3.3-70b-versatile",
 ];
-const DEFAULT_JUDGE_MODEL = "gemini-2.5-pro";
+const DEFAULT_JUDGE_MODEL = "openai/gpt-oss-120b";
 
 function normalizeReviewDecision(
   decision: "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
@@ -64,9 +64,15 @@ async function main() {
     // =========================================================================
     logger.step(1, "Parsing inputs from action.yml");
 
+    const llmProviderInput = core.getInput("llm_provider") || "groq";
+    const llmApiKeyInput = core.getInput("llm_api_key");
+    const llmProviderUrlInput = core.getInput("llm_provider_url");
+
     const config: ActionConfig = {
       githubToken: core.getInput("github_token"),
-      geminiApiKey: core.getInput("gemini_api_key"),
+      llmProvider: llmProviderInput as ActionConfig["llmProvider"],
+      llmApiKey: llmApiKeyInput,
+      llmProviderUrl: llmProviderUrlInput || undefined,
       reviewerModels: (
         core.getInput("reviewer_models") || DEFAULT_REVIEWER_MODELS.join(",")
       )
@@ -82,13 +88,22 @@ async function main() {
       debug: core.getInput("debug") === "true",
     };
 
-    if (!config.githubToken || !config.geminiApiKey) {
+    if (!config.githubToken || !config.llmApiKey) {
+      throw new Error("Missing required inputs: github_token and llm_api_key");
+    }
+
+    const supportedProviders = ["gemini", "groq"];
+    if (!supportedProviders.includes(config.llmProvider)) {
       throw new Error(
-        "Missing required inputs: github_token or gemini_api_key"
+        `Invalid llm_provider '${config.llmProvider}'. Supported providers: ${supportedProviders.join(", ")}`
       );
     }
 
     logger.success("✓ Inputs validated");
+    logger.info(`  - LLM Provider: ${config.llmProvider}`);
+    if (config.llmProviderUrl) {
+      logger.info(`  - LLM Provider URL: ${config.llmProviderUrl}`);
+    }
     logger.info(`  - Reviewer Models: ${config.reviewerModels.join(", ")}`);
     logger.info(`  - Judge Model: ${config.judgeModel}`);
     logger.info(`  - Max Consensus Rounds: ${config.maxConsensusRounds}`);
@@ -259,11 +274,13 @@ async function main() {
     // =========================================================================
     logger.step(9, "Running multi-model consensus review");
 
-    const orchestrator = new ReviewOrchestrator(config.geminiApiKey, {
+    const orchestrator = new ReviewOrchestrator(config.llmApiKey, {
       reviewerModels: config.reviewerModels,
       judgeModel: config.judgeModel,
       maxConsensusRounds: config.maxConsensusRounds,
       debug: config.debug,
+      provider: config.llmProvider,
+      providerUrl: config.llmProviderUrl,
     });
 
     const reviewResult = await orchestrator.runConsensusReview(llmContext);

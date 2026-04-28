@@ -76,7 +76,7 @@ export interface LLMContext {
   files: FileChange[];
 }
 
-export type LLMProvider = "gemini";
+export type LLMProvider = "gemini" | "groq";
 
 export interface LLMClientOptions {
   provider?: LLMProvider;
@@ -181,7 +181,9 @@ export interface PRReviewResponse {
 
 export interface ActionConfig {
   githubToken: string;
-  geminiApiKey: string;
+  llmProvider: LLMProvider;
+  llmApiKey: string;
+  llmProviderUrl?: string;
   reviewerModels: string[];
   judgeModel: string;
   maxConsensusRounds: number;

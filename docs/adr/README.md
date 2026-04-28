@@ -13,12 +13,12 @@ ADRs are records of architecturally significant decisions made in the project. T
 
 ## Index
 
-| ADR                                                        | Title                                    | Status   | Date       |
-| ---------------------------------------------------------- | ---------------------------------------- | -------- | ---------- |
-| [ADR-001](./ADR-001-multi-model-consensus-architecture.md) | Multi-Model Consensus Architecture       | Accepted | 2026-04-23 |
-| [ADR-002](./ADR-002-gemini-api-integration.md)             | Gemini API Integration & Model Selection | Accepted | 2026-04-23 |
-| [ADR-003](./ADR-003-inline-comment-mapping.md)             | Inline Comment Mapping & Line Accuracy   | Accepted | 2026-04-23 |
-| [ADR-004](./ADR-004-idempotency-state-management.md)       | Idempotency & State Management           | Accepted | 2026-04-23 |
+| ADR                                                        | Title                                      | Status   | Date       |
+| ---------------------------------------------------------- | ------------------------------------------ | -------- | ---------- |
+| [ADR-001](./ADR-001-multi-model-consensus-architecture.md) | Multi-Model Consensus Architecture         | Accepted | 2026-04-23 |
+| [ADR-002](./ADR-002-api-api-integration.md)                | LLM Provider Integration & Model Selection | Accepted | 2026-04-23 |
+| [ADR-003](./ADR-003-inline-comment-mapping.md)             | Inline Comment Mapping & Line Accuracy     | Accepted | 2026-04-23 |
+| [ADR-004](./ADR-004-idempotency-state-management.md)       | Idempotency & State Management             | Accepted | 2026-04-23 |
 
 ## Reading Guide
 

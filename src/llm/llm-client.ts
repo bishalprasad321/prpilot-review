@@ -12,6 +12,7 @@ import fetch from "node-fetch";
 import { Logger } from "../utils/logger.js";
 import {
   LLMContext,
+  LLMProvider,
   ReviewerOpinion,
   ConsensusDecision,
   ReviewDecision,
@@ -39,6 +40,30 @@ interface GeminiResponse {
   };
 }
 
+interface GroqResponse {
+  output?: Array<{
+    id?: string;
+    type?: string;
+    content?: Array<{
+      type?: string;
+      text?: string;
+    }>;
+  }>;
+  choices?: Array<{
+    text?: string;
+    message?: {
+      content?: string;
+    };
+  }>;
+  data?: Array<Record<string, unknown>>;
+  models?: Array<Record<string, unknown>>;
+  error?: {
+    code?: number | string;
+    message?: string;
+    type?: string;
+  };
+}
+
 interface GeminiModelsListResponse {
   models?: Array<{
     name?: string;
@@ -53,19 +78,23 @@ interface GeminiModelsListResponse {
 }
 
 interface LLMClientOptions {
+  provider?: LLMProvider;
+  baseUrl?: string;
   debug?: boolean;
   maxRetries?: number;
   retryDelayMs?: number;
 }
 
+type LLMResponse = GeminiResponse | GroqResponse;
+
 type ModelPurpose = "reviewer" | "judge";
 
-class GeminiApiError extends Error {
+class LLMApiError extends Error {
   statusCode: number;
 
   constructor(statusCode: number, message: string) {
     super(message);
-    this.name = "GeminiApiError";
+    this.name = "LLMApiError";
     this.statusCode = statusCode;
   }
 }
@@ -77,36 +106,57 @@ const MODEL_ALIASES: Record<string, string> = {
   "gemini-2.0-flash-thinking-exp": "gemini-2.5-pro",
 };
 
-const REVIEWER_FALLBACK_MODELS = [
-  "gemini-2.5-flash",
-  "gemini-2.5-flash-lite",
-  "gemini-2.5-pro",
-  "gemini-2.0-flash",
-  "gemini-2.0-flash-lite",
-];
-
-const JUDGE_FALLBACK_MODELS = [
-  "gemini-2.5-pro",
-  "gemini-2.5-flash",
-  "gemini-2.0-flash",
-  "gemini-2.5-flash-lite",
-];
+const FALLBACK_MODELS: Record<
+  LLMProvider,
+  { reviewer: string[]; judge: string[] }
+> = {
+  gemini: {
+    reviewer: [
+      "gemini-2.5-flash",
+      "gemini-2.5-flash-lite",
+      "gemini-2.5-pro",
+      "gemini-2.0-flash",
+      "gemini-2.0-flash-lite",
+    ],
+    judge: [
+      "gemini-2.5-pro",
+      "gemini-2.5-flash",
+      "gemini-2.0-flash",
+      "gemini-2.5-flash-lite",
+    ],
+  },
+  groq: {
+    reviewer: [
+      "llama-3.1-8b-instant",
+      "openai/gpt-oss-20b",
+      "llama-3.3-70b-versatile",
+    ],
+    judge: ["openai/gpt-oss-120b", "llama-3.3-70b-versatile"],
+  },
+};
 
 export class LLMClient {
   private apiKey: string;
+  private provider: LLMProvider;
   private logger: Logger;
   private maxRetries: number;
   private retryDelayMs: number;
-  private baseUrl = "https://generativelanguage.googleapis.com/v1beta/models";
+  private baseUrl: string;
   private availableGenerateContentModels: Set<string> | null = null;
   private resolvedModelCache = new Map<string, string>();
   private totalTokens = { prompt: 0, completion: 0, total: 0 };
 
   constructor(apiKey: string, options: LLMClientOptions = {}) {
     this.apiKey = apiKey;
+    this.provider = options.provider || "gemini";
     this.logger = new Logger(options.debug);
     this.maxRetries = options.maxRetries || 3;
     this.retryDelayMs = options.retryDelayMs || 1000;
+    this.baseUrl =
+      options.baseUrl ||
+      (this.provider === "groq"
+        ? "https://api.groq.com/openai/v1"
+        : "https://generativelanguage.googleapis.com/v1beta/models");
   }
 
   /**
@@ -141,10 +191,10 @@ export class LLMClient {
     );
 
     try {
-      let response: GeminiResponse;
+      let response: LLMResponse;
 
       try {
-        response = await this.callGeminiAPI(
+        response = await this.callModelAPI(
           resolvedModel,
           prompt,
           this.getReviewerResponseSchema()
@@ -160,7 +210,7 @@ export class LLMClient {
             `Reviewer model '${resolvedModel}' failed. Retrying once with backup model '${backupModel}'.`
           );
           resolvedModel = backupModel;
-          response = await this.callGeminiAPI(
+          response = await this.callModelAPI(
             resolvedModel,
             prompt,
             this.getReviewerResponseSchema()
@@ -211,10 +261,10 @@ export class LLMClient {
     );
 
     try {
-      let response: GeminiResponse;
+      let response: LLMResponse;
 
       try {
-        response = await this.callGeminiAPI(
+        response = await this.callModelAPI(
           resolvedModel,
           prompt,
           this.getJudgeResponseSchema()
@@ -230,7 +280,7 @@ export class LLMClient {
             `Judge model '${resolvedModel}' failed. Retrying once with backup model '${backupModel}'.`
           );
           resolvedModel = backupModel;
-          response = await this.callGeminiAPI(
+          response = await this.callModelAPI(
             resolvedModel,
             prompt,
             this.getJudgeResponseSchema()
@@ -378,6 +428,22 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
   }
 
   /**
+   * Call the configured LLM provider with retry logic
+   */
+  private async callModelAPI(
+    model: string,
+    prompt: string,
+    responseSchema: Record<string, unknown>,
+    attempt: number = 1
+  ): Promise<LLMResponse> {
+    if (this.provider === "groq") {
+      return this.callGroqAPI(model, prompt, responseSchema, attempt);
+    }
+
+    return this.callGeminiAPI(model, prompt, responseSchema, attempt);
+  }
+
+  /**
    * Call Gemini API with retry logic
    */
   private async callGeminiAPI(
@@ -420,7 +486,7 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
 
       if (!response.ok) {
         const errorData = (await response.json()) as GeminiResponse;
-        throw new GeminiApiError(
+        throw new LLMApiError(
           response.status,
           `Gemini API error: ${response.status} - ${errorData.error?.message || "Unknown error"}`
         );
@@ -457,10 +523,80 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
   }
 
   /**
+   * Call Groq API with retry logic
+   */
+  private async callGroqAPI(
+    model: string,
+    prompt: string,
+    _responseSchema: Record<string, unknown>,
+    attempt: number = 1
+  ): Promise<GroqResponse> {
+    const trimmedBase = this.baseUrl.replace(/\/$/, "");
+    const useOpenAICompat = trimmedBase.includes("/openai/v1");
+    const openAIBase = trimmedBase.replace(/\/models$/, "");
+    const url = useOpenAICompat
+      ? `${openAIBase}/chat/completions`
+      : `${trimmedBase}/${model}/generate`;
+
+    const body = useOpenAICompat
+      ? {
+          model,
+          messages: [
+            {
+              role: "user",
+              content: prompt,
+            },
+          ],
+          temperature: 0.7,
+          top_p: 0.95,
+          max_tokens: 2048,
+        }
+      : {
+          input: prompt,
+          temperature: 0.7,
+          top_p: 0.95,
+          max_output_tokens: 2048,
+          top_k: 40,
+        };
+
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) {
+        const errorData = (await response.json()) as GroqResponse;
+        throw new LLMApiError(
+          response.status,
+          `Groq API error: ${response.status} - ${errorData.error?.message || "Unknown error"}`
+        );
+      }
+
+      const data = (await response.json()) as GroqResponse;
+      return data;
+    } catch (error) {
+      if (attempt < this.maxRetries && this.isRetryableError(error)) {
+        this.logger.warn(
+          `API call failed (attempt ${attempt}/${this.maxRetries}), retrying in ${this.retryDelayMs}ms...`
+        );
+        await this.delay(this.retryDelayMs);
+        return this.callGroqAPI(model, prompt, _responseSchema, attempt + 1);
+      }
+
+      throw error;
+    }
+  }
+
+  /**
    * Parse reviewer model response
    */
   private parseReviewerResponse(
-    response: GeminiResponse,
+    response: LLMResponse,
     modelName: string,
     reviewerId: string
   ): ReviewerOpinion {
@@ -519,7 +655,7 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
    * Parse judge model response
    */
   private parseJudgeResponse(
-    response: GeminiResponse,
+    response: LLMResponse,
     roundNumber: number
   ): ConsensusDecision {
     const text = this.extractResponseText(response);
@@ -563,9 +699,37 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
   /**
    * Extract text from Gemini response
    */
-  private extractResponseText(response: GeminiResponse): string {
+  private extractResponseText(response: LLMResponse): string {
+    if (this.provider === "groq") {
+      const groqResponse = response as GroqResponse;
+      // Try OpenAI-compatible chat/completions format first
+      if (groqResponse.choices && Array.isArray(groqResponse.choices)) {
+        const openAIText = groqResponse.choices
+          .map((choice) => choice.text || choice.message?.content || "")
+          .join("")
+          .trim();
+        if (openAIText) {
+          return openAIText;
+        }
+      }
+
+      // Fallback to legacy Groq format
+      if (groqResponse.output && Array.isArray(groqResponse.output)) {
+        const groqText = groqResponse.output
+          .map((out) => out.content?.map((item) => item.text || "").join(""))
+          .join("")
+          .trim();
+        if (groqText) {
+          return groqText;
+        }
+      }
+
+      return "";
+    }
+
+    const geminiResponse = response as GeminiResponse;
     const text =
-      response.candidates?.[0]?.content?.parts
+      geminiResponse.candidates?.[0]?.content?.parts
         ?.map((part) => part.text || "")
         .join("") || "";
     return text.trim();
@@ -608,21 +772,23 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
       }
 
       const fallbackCandidates =
-        purpose === "judge" ? JUDGE_FALLBACK_MODELS : REVIEWER_FALLBACK_MODELS;
+        purpose === "judge"
+          ? FALLBACK_MODELS[this.provider].judge
+          : FALLBACK_MODELS[this.provider].reviewer;
       const fallback = fallbackCandidates.find((candidate) =>
         availableModels.has(candidate)
       );
 
       if (fallback) {
         this.logger.warn(
-          `Model '${normalizedRequestedModel}' is unavailable for generateContent. Falling back to '${fallback}'.`
+          `Model '${normalizedRequestedModel}' is unavailable for ${this.provider} generation. Falling back to '${fallback}'.`
         );
         this.resolvedModelCache.set(cacheKey, fallback);
         return fallback;
       }
     } catch (error) {
       this.logger.warn(
-        `Could not fetch Gemini model list for validation: ${
+        `Could not fetch ${this.provider.toUpperCase()} model list for validation: ${
           error instanceof Error ? error.message : String(error)
         }`
       );
@@ -646,7 +812,9 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
     try {
       const availableModels = await this.getAvailableGenerateContentModels();
       const fallbackCandidates =
-        purpose === "judge" ? JUDGE_FALLBACK_MODELS : REVIEWER_FALLBACK_MODELS;
+        purpose === "judge"
+          ? FALLBACK_MODELS[this.provider].judge
+          : FALLBACK_MODELS[this.provider].reviewer;
 
       const backupModel = fallbackCandidates.find(
         (candidate) =>
@@ -665,6 +833,76 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
   private async getAvailableGenerateContentModels(): Promise<Set<string>> {
     if (this.availableGenerateContentModels) {
       return this.availableGenerateContentModels;
+    }
+
+    if (this.provider === "groq") {
+      const availableModels = new Set<string>();
+      const trimmedBase = this.baseUrl.replace(/\/$/, "");
+      const url = trimmedBase.endsWith("/models")
+        ? new URL(trimmedBase)
+        : new URL(`${trimmedBase}/models`);
+
+      try {
+        const response = await fetch(url.toString(), {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${this.apiKey}`,
+          },
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new LLMApiError(
+            response.status,
+            `Groq model list error: ${response.status} - ${(errorData as { error?: { message?: string } }).error?.message || "Unknown error"}`
+          );
+        }
+
+        const data = (await response.json()) as Record<string, unknown>;
+
+        const models = Array.isArray(data.data)
+          ? (data.data as Array<Record<string, unknown>>)
+          : Array.isArray(data.models)
+            ? (data.models as Array<Record<string, unknown>>)
+            : [];
+
+        for (const model of models) {
+          const modelName = this.normalizeModelName(
+            String(model.id || model.name || model.model || "")
+          );
+          if (modelName) {
+            availableModels.add(modelName);
+          }
+        }
+
+        if (availableModels.size === 0) {
+          this.logger.warn(
+            "Could not parse Groq model list response. Falling back to known Groq models."
+          );
+          FALLBACK_MODELS.groq.reviewer.forEach((model) =>
+            availableModels.add(model)
+          );
+          FALLBACK_MODELS.groq.judge.forEach((model) =>
+            availableModels.add(model)
+          );
+        }
+
+        this.availableGenerateContentModels = availableModels;
+        return availableModels;
+      } catch (error) {
+        this.logger.warn(
+          `Could not fetch Groq model list from ${url.toString()}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+        const fallbackModels = new Set<string>([
+          ...FALLBACK_MODELS.groq.reviewer,
+          ...FALLBACK_MODELS.groq.judge,
+        ]);
+        this.availableGenerateContentModels = fallbackModels;
+        return fallbackModels;
+      }
     }
 
     const availableModels = new Set<string>();
@@ -687,7 +925,7 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
 
       if (!response.ok) {
         const errorData = (await response.json()) as GeminiModelsListResponse;
-        throw new GeminiApiError(
+        throw new LLMApiError(
           response.status,
           `Gemini model list error: ${response.status} - ${errorData.error?.message || "Unknown error"}`
         );
@@ -1065,7 +1303,7 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
    * Retry only transient failures. 4xx model/config errors should fail fast.
    */
   private isRetryableError(error: unknown): boolean {
-    if (error instanceof GeminiApiError) {
+    if (error instanceof LLMApiError) {
       return error.statusCode === 429 || error.statusCode >= 500;
     }
 
@@ -1076,7 +1314,7 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
    * Detect errors where another model is worth trying.
    */
   private isModelFailureError(error: unknown): boolean {
-    if (error instanceof GeminiApiError) {
+    if (error instanceof LLMApiError) {
       return error.statusCode === 404 || error.statusCode === 429;
     }
 
@@ -1097,7 +1335,7 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
     // Log if this is a model availability or quota issue
     if (errorMsg.includes("404") || errorMsg.includes("not found")) {
       this.logger.error(
-        `⚠️ Model not available: '${modelName}' - Check Gemini API documentation for available models in v1beta`
+        `⚠️ Model not available: '${modelName}' - Check ${this.provider.toUpperCase()} API documentation for available models`
       );
     } else if (errorMsg.includes("429") || errorMsg.includes("quota")) {
       this.logger.error(
