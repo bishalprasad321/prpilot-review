@@ -1287,6 +1287,18 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
                 throw new LLMApiError(response.status, `Groq API error: ${response.status} - ${errorData.error?.message || "Unknown error"}`);
             }
             const data = (await response.json());
+            // Track token usage from Groq response
+            if (data.usage) {
+                if (data.usage.prompt_tokens) {
+                    this.totalTokens.prompt += data.usage.prompt_tokens;
+                }
+                if (data.usage.completion_tokens) {
+                    this.totalTokens.completion += data.usage.completion_tokens;
+                }
+                if (data.usage.total_tokens) {
+                    this.totalTokens.total += data.usage.total_tokens;
+                }
+            }
             return data;
         }
         catch (error) {
