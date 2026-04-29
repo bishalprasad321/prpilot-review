@@ -67,9 +67,9 @@ jobs:
         uses: bishalprasad321/prpilot-summary@v1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          llm_api_key: ${{ secrets.GROQ_API_KEY }}
-          llm_provider: groq
-          ai_model: groq-1.5-mini
+          llm_api_key: ${{ secrets.GEMINI_API_KEY }}
+          llm_provider: gemini
+          ai_model: gemini-2.5-flash
           max_diff_lines: "5000"
           enable_incremental_diff_processing: "true"
           debug: ${{ inputs.debug_enabled || 'false' }}
