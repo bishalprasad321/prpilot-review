@@ -397,7 +397,9 @@ ${reasons}`;
     decision: ReviewDecision,
     findings: CodeFinding[]
   ): ReviewDecision {
-    if (findings.length > 0) {
+    // Only upgrade COMMENT to REQUEST_CHANGES if there are findings
+    // Never override explicit judge decisions (APPROVE or REQUEST_CHANGES)
+    if (decision === "COMMENT" && findings.length > 0) {
       return "REQUEST_CHANGES";
     }
 

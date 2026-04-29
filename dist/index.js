@@ -647,7 +647,9 @@ const DEFAULT_REVIEWER_MODELS = [
 ];
 const DEFAULT_JUDGE_MODEL = "openai/gpt-oss-120b";
 function normalizeReviewDecision(decision, findingsCount) {
-    if (findingsCount > 0) {
+    // Only upgrade COMMENT to REQUEST_CHANGES if there are findings
+    // Never override explicit judge decisions (APPROVE or REQUEST_CHANGES)
+    if (decision === "COMMENT" && findingsCount > 0) {
         return "REQUEST_CHANGES";
     }
     return decision;
@@ -1287,6 +1289,18 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
                 throw new LLMApiError(response.status, `Groq API error: ${response.status} - ${errorData.error?.message || "Unknown error"}`);
             }
             const data = (await response.json());
+            // Track token usage from Groq response
+            if (data.usage) {
+                if (data.usage.prompt_tokens) {
+                    this.totalTokens.prompt += data.usage.prompt_tokens;
+                }
+                if (data.usage.completion_tokens) {
+                    this.totalTokens.completion += data.usage.completion_tokens;
+                }
+                if (data.usage.total_tokens) {
+                    this.totalTokens.total += data.usage.total_tokens;
+                }
+            }
             return data;
         }
         catch (error) {
@@ -2377,7 +2391,9 @@ ${reasons}`;
         });
     }
     normalizeReviewDecision(decision, findings) {
-        if (findings.length > 0) {
+        // Only upgrade COMMENT to REQUEST_CHANGES if there are findings
+        // Never override explicit judge decisions (APPROVE or REQUEST_CHANGES)
+        if (decision === "COMMENT" && findings.length > 0) {
             return "REQUEST_CHANGES";
         }
         return decision;

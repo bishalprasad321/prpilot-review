@@ -47,7 +47,9 @@ function normalizeReviewDecision(
   decision: "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
   findingsCount: number
 ): "APPROVE" | "REQUEST_CHANGES" | "COMMENT" {
-  if (findingsCount > 0) {
+  // Only upgrade COMMENT to REQUEST_CHANGES if there are findings
+  // Never override explicit judge decisions (APPROVE or REQUEST_CHANGES)
+  if (decision === "COMMENT" && findingsCount > 0) {
     return "REQUEST_CHANGES";
   }
 

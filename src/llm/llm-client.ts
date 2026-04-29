@@ -55,6 +55,11 @@ interface GroqResponse {
       content?: string;
     };
   }>;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
   data?: Array<Record<string, unknown>>;
   models?: Array<Record<string, unknown>>;
   error?: {
@@ -578,6 +583,20 @@ RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT.`;
       }
 
       const data = (await response.json()) as GroqResponse;
+
+      // Track token usage from Groq response
+      if (data.usage) {
+        if (data.usage.prompt_tokens) {
+          this.totalTokens.prompt += data.usage.prompt_tokens;
+        }
+        if (data.usage.completion_tokens) {
+          this.totalTokens.completion += data.usage.completion_tokens;
+        }
+        if (data.usage.total_tokens) {
+          this.totalTokens.total += data.usage.total_tokens;
+        }
+      }
+
       return data;
     } catch (error) {
       if (attempt < this.maxRetries && this.isRetryableError(error)) {
