@@ -30,10 +30,10 @@ Start with **ADR-001** for the overall architecture, then read others based on y
 
 ## Status Legend
 
-- 🟢 **Accepted** — Implemented and in use
-- 🟡 **Proposed** — Under discussion
-- 🔴 **Rejected** — Decision not taken
-- ⚪ **Superseded** — Replaced by later ADR
+- **Accepted** — Implemented and in use
+- **Proposed** — Under discussion
+- **Rejected** — Decision not taken
+- **Superseded** — Replaced by later ADR
 
 ---
 
