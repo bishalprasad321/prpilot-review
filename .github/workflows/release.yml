@@ -4,8 +4,6 @@ on:
   push:
     tags:
       - "v*.*.*" # Trigger on tags like v1.0.0, v2.1.3, etc.
-    branches:
-      - "*"
 
 permissions:
   contents: write
@@ -20,12 +18,14 @@ jobs:
 
       - name: Create Release
         id: create_release
-        run: |
-          gh release create ${{ github.ref_name }} --title \
-          --title "${{ github.ref_name }}" \
-          --notes "Release ${{ github.ref_name }}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ github.ref_name }}
+        run: |
+          gh release create "$tag" \
+          --repo="${{ github.repository }}" \
+          --title="${{ github.ref_name }}" \
+          --generate-notes
 
   update-majorver:
     name: Update Major Version
