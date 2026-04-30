@@ -1,8 +1,6 @@
 # ADR-001: Multi-Model Consensus Architecture
 
 **Status:** Accepted  
-**Date:** 2026-04-23  
-**Deciders:** Bishal Prasad  
 **Affects:** Core review logic, system reliability
 
 ## Context
@@ -25,14 +23,14 @@ We chose **Multi-Model Consensus with 3 reviewers + 1 judge** architecture:
 
 ```
 Parallel Reviewers (3 models)     Judge Model (1 model)
-         ↓                                 ↓
-    ✅ reviewer-1              🏛️ Judge (if needed)
-    ✅ reviewer-2              Makes final decision
-    ✅ reviewer-3
-         ↓
+         |                                 |
+    reviewer-1                         Judge (if needed)
+    reviewer-2                         Makes final decision
+    reviewer-3
+         |
     Check Consensus
-    (2+ agree? → DONE)
-    (all differ? → JUDGE)
+    (2+ agree? -> DONE)
+    (all differ? -> JUDGE)
 ```
 
 ### Architecture Details
@@ -45,8 +43,8 @@ Parallel Reviewers (3 models)     Judge Model (1 model)
 
 **Phase 2: Consensus Evaluation**
 
-- If 2 or 3 reviewers agree → Use that decision (DONE)
-- If all 3 disagree → Call judge model for tie-breaking
+- If 2 or 3 reviewers agree -> Use that decision (DONE)
+- If all 3 disagree -> Call judge model for tie-breaking
 
 **Phase 3: Judge Decision (Optional)**
 
@@ -84,7 +82,7 @@ Parallel Reviewers (3 models)     Judge Model (1 model)
 
 ## Consequences
 
-### Positive ✅
+### Positive Impacts
 
 - **Reliability** — Consensus reduces single-point failures
 - **Quality** — More thorough review with multiple perspectives
@@ -93,7 +91,7 @@ Parallel Reviewers (3 models)     Judge Model (1 model)
 - **Graceful Degradation** — If one model fails, others continue
 - **Production Ready** — More robust for mission-critical code reviews
 
-### Negative ❌
+### Negative Impacts
 
 - **Cost** — ~3-4x more expensive than single model
 - **Complexity** — More code to maintain (consensus logic)
@@ -106,7 +104,7 @@ Parallel Reviewers (3 models)     Judge Model (1 model)
 ### Alternative 1: Single Model
 
 ```
-PR → Model → Decision
+PR -> Model -> Decision
 ```
 
 - **Pro:** Fast, cheap, simple
@@ -116,11 +114,11 @@ PR → Model → Decision
 ### Alternative 2: Sequential Multiple Models
 
 ```
-PR → Model-1 → Decision?
-     ↓ (if no consensus)
-     Model-2 → Decision?
-     ↓ (if no consensus)
-     Model-3 → Decision
+PR -> Model-1 -> Decision?
+     | (if no consensus)
+     Model-2 -> Decision?
+     | (if no consensus)
+     Model-3 -> Decision
 ```
 
 - **Pro:** Cheaper if consensus early
@@ -172,12 +170,12 @@ PRPILOT_DEBUG=true npm test
 
 ### Test Cases
 
-- ✅ All 3 agree → Use agreement
-- ✅ 2 agree, 1 differs → Use agreement
-- ✅ All 3 differ → Call judge
-- ✅ One reviewer fails → Continue with 2
-- ✅ Two reviewers fail → Use last one
-- ✅ All three fail → Return default
+- All 3 agree -> Use agreement
+- 2 agree, 1 differs -> Use agreement
+- All 3 differ -> Call judge
+- One reviewer fails -> Continue with 2
+- Two reviewers fail -> Use last one
+- All three fail -> Return default
 
 ## Migration Path
 
@@ -198,4 +196,4 @@ If this decision needs revision:
 
 - `src/review/review-orchestrator.ts` — Implementation
 - `src/llm/llm-client.ts` — LLM abstraction
-- `docs/adr/ADR-002-gemini-api-integration.md` — Model selection
+- `docs/adr/ADR-002-api-api-integration.md` — Model selection

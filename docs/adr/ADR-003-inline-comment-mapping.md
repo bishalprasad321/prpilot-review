@@ -1,8 +1,6 @@
 # ADR-003: Inline Comment Mapping & Line Accuracy
 
 **Status:** Accepted  
-**Date:** 2026-04-23  
-**Deciders:** Bishal Prasad  
 **Affects:** Comment accuracy, user experience, debugging
 
 ## Context
@@ -28,9 +26,9 @@ This ADR documents how we solve the line mapping problem.
 
 ```
 Model Finding: "src/app.ts, lines 42-45, unused variable"
-             ↓
+             |
              Line Mapper
-             ↓
+             |
 GitHub Comment: "Posted on line 45 in unified diff"
                 (actual position in diff, not in full file)
 ```
@@ -83,7 +81,7 @@ For each file, track:
 
 **Lookup in map:**
 
-1. File: `src/app.ts` ✓
+1. File: `src/app.ts` (Found)
 2. Lines 42-43 in the diff
 3. Found: REMOVED lines (old code being removed)
 4. **GitHub doesn't support comments on removed lines**
@@ -96,7 +94,7 @@ For each file, track:
   path: "src/app.ts",
   line: 44,  // Position in diff
   side: "LEFT",  // or "RIGHT" for added lines
-  body: "⚠️ Unused variable `verbose` — consider removing",
+  body: "Warning: Unused variable `verbose` — consider removing",
   commit_id: "abc123...",
 }
 ```
@@ -127,7 +125,7 @@ For each file, track:
 
 **Solution:**
 
-- Tolerance band (±5 lines) to find intended line
+- Tolerance band (+/- 5 lines) to find intended line
 - Fall back to general comment if no match found
 
 ### Challenge 4: Diff Size
@@ -193,40 +191,40 @@ index abc..def 100644
 type LineType = "context" | "added" | "removed";
 
 // Line starts with:
-//   " " → context line (unchanged)
-//   "-" → removed line (old code)
-//   "+" → added line (new code)
+//   " " -> context line (unchanged)
+//   "-" -> removed line (old code)
+//   "+" -> added line (new code)
 ```
 
 ## GitHub API Constraints
 
 ### Can Comment On:
 
-- ✅ Added lines (side: "RIGHT")
-- ✅ Multiple lines in same file
-- ✅ Multiple files
+- Added lines (side: "RIGHT")
+- Multiple lines in same file
+- Multiple files
 
 ### Cannot Comment On:
 
-- ❌ Removed lines (would comment on deleted code)
-- ❌ Context lines outside hunk
-- ❌ File sections not in diff
+- Removed lines (would comment on deleted code)
+- Context lines outside hunk
+- File sections not in diff
 
 ### Handling:
 
-- Comments on removed lines → Post general PR comment instead
-- Comments on context → Map to nearest added line or skip
+- Comments on removed lines -> Post general PR comment instead
+- Comments on context -> Map to nearest added line or skip
 
 ## Consequences
 
-### Positive ✅
+### Positive Impacts
 
 - Accurate line mapping ensures right feedback on right code
 - Comments appear at exact location where user writes code
 - Supports complex diffs with multiple files
 - Handles edge cases gracefully
 
-### Negative ❌
+### Negative Impacts
 
 - Cannot comment on removed lines (GitHub limitation)
 - Performance impact for very large diffs
@@ -269,12 +267,12 @@ npm test -- inline-comment-builder.test.ts
 
 **Test Cases:**
 
-- ✅ Parse simple diff with added/removed lines
-- ✅ Map findings to correct line numbers
-- ✅ Handle multi-line hunks
-- ✅ Skip comments on removed lines
-- ✅ Handle missing files in diff
-- ✅ Tolerance band for line number mismatch
+- Parse simple diff with added/removed lines
+- Map findings to correct line numbers
+- Handle multi-line hunks
+- Skip comments on removed lines
+- Handle missing files in diff
+- Tolerance band for line number mismatch
 
 ### Test Fixtures
 

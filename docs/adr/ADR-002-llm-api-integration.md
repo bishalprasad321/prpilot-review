@@ -1,8 +1,6 @@
 # ADR-002: LLM Provider Integration & Model Selection
 
 **Status:** Accepted  
-**Date:** 2026-04-23  
-**Deciders:** Bishal Prasad  
 **Affects:** LLM integration, provider selection, model performance, API costs
 
 ## Context
@@ -16,11 +14,11 @@ The PR Pilot Review system needed to choose:
 
 ### Constraints
 
-- ✅ Must support free/low-cost tier
-- ✅ Must have parallel request capability
-- ✅ Must be available in v1beta API (GitHub Actions accessible)
-- ✅ Must support JSON structured output
-- ✅ Performance: reviewers must complete in <5 seconds total
+- Must support free/low-cost tier
+- Must have parallel request capability
+- Must be available in v1beta API (GitHub Actions accessible)
+- Must support JSON structured output
+- Performance: reviewers must complete in <5 seconds total
 
 ## Decision
 
@@ -33,14 +31,14 @@ The PR Pilot Review system needed to choose:
 
 ### Why Gemini or Groq?
 
-| Criteria       | Gemini          | Groq    | OpenAI  | Claude  | Reason                   |
-| -------------- | --------------- | ------- | ------- | ------- | ------------------------ |
-| Free tier      | ✅ Yes          | ✅ Yes  | ❌ No   | ❌ No   | Cost critical for OSS    |
-| JSON output    | ✅ Yes          | ✅ Yes  | ✅ Yes  | ✅ Yes  | All equal                |
-| API support    | ✅ v1beta       | ✅ v1   | ✅ Fast | ✅ Fast | Both providers available |
-| Speed          | ✅ Flash models | ✅ Mini | ✅ Fast | ✅ Fast | Both support fast models |
-| Parallel calls | ✅ Yes          | ✅ Yes  | ✅ Yes  | ✅ Yes  | All support it           |
-| **Chosen**     | ✅              | ✅      | ✗       | ✗       |                          |
+| Criteria       | Gemini       | Groq | OpenAI | Claude | Reason                   |
+| -------------- | ------------ | ---- | ------ | ------ | ------------------------ |
+| Free tier      | Yes          | Yes  | No     | No     | Cost critical for OSS    |
+| JSON output    | Yes          | Yes  | Yes    | Yes    | All equal                |
+| API support    | v1beta       | v1   | Fast   | Fast   | Both providers available |
+| Speed          | Flash models | Mini | Fast   | Fast   | Both support fast models |
+| Parallel calls | Yes          | Yes  | Yes    | Yes    | All support it           |
+| **Chosen**     | Yes          | Yes  | No     | No     |                          |
 
 ### Why These Models?
 
@@ -88,11 +86,11 @@ const response = await fetch(url, {
 
 **Why Fetch?**
 
-- ✅ Smaller bundle size (NCC bundles all dependencies)
-- ✅ No external SDK required
-- ✅ More control over retry logic
-- ✅ Easier to debug (raw HTTP requests)
-- ✅ Works in GitHub Actions environment
+- Smaller bundle size (NCC bundles all dependencies)
+- No external SDK required
+- More control over retry logic
+- Easier to debug (raw HTTP requests)
+- Works in GitHub Actions environment
 
 ### Response Parsing
 
@@ -153,7 +151,7 @@ If a model becomes unavailable:
 
 - OpenAI GPT-4o: ~$0.01-0.02 per review
 - Single Gemini model: ~$0.0005-0.001 per review
-- **Gemini consensus: ~$0.002-0.005 per review** ✅
+- **Gemini consensus: ~$0.002-0.005 per review**
 
 ## Retry Logic
 
@@ -177,39 +175,39 @@ for (let attempt = 1; attempt <= maxRetries; attempt++) {
 
 - Max retries: 3
 - Initial delay: 1000ms
-- Exponential backoff: 1s → 2s → 4s
+- Exponential backoff: 1s -> 2s -> 4s
 
 ## Error Handling
 
 ### 404 Errors (Model Not Found)
 
 ```
-⚠️ Model not available: 'gemini-1.5-pro'
-   Check Gemini API docs for available models in v1beta
+Warning: Model not available: 'gemini-1.5-pro'
+         Check Gemini API docs for available models in v1beta
 ```
 
-→ Falls back to COMMENT decision
+-> Falls back to COMMENT decision
 
 ### 429 Errors (Rate Limited)
 
 ```
-⚠️ API Quota exceeded for model 'gemini-2.0-flash'
-   Upgrade billing plan or use lighter models
+Warning: API Quota exceeded for model 'gemini-2.0-flash'
+         Upgrade billing plan or use lighter models
 ```
 
-→ Falls back to COMMENT decision
+-> Falls back to COMMENT decision
 
 ### 401 Errors (Invalid Key)
 
 ```
-❌ Unauthorized: Check the configured LLM provider API key
+Error: Unauthorized: Check the configured LLM provider API key
 ```
 
-→ Throws error (fails workflow step)
+-> Throws error (fails workflow step)
 
 ## Consequences
 
-### Positive ✅
+### Positive Impacts
 
 - Free tier available for testing/small projects
 - Flash models are genuinely fast
@@ -217,7 +215,7 @@ for (let attempt = 1; attempt <= maxRetries; attempt++) {
 - v1beta API is stable
 - Good cost/performance ratio
 
-### Negative ❌
+### Negative Impacts
 
 - Gemini still newer than OpenAI (fewer real-world examples)
 - Model names change frequently (v1beta versioning)
@@ -271,22 +269,22 @@ GROQ_API_KEY=... npm test -- --integration
 ### Default (Balanced)
 
 ```yaml
-reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-pro"
-judge_model: "gemini-2.5-pro"
+reviewer_models: "llama-3.1-8b-instant,openai/gpt-oss-20b,llama-3.3-70b-versatile"
+judge_model: "openai/gpt-oss-120b"
 ```
 
-### Cost Optimized
+### Maximum Speed
 
 ```yaml
-reviewer_models: "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-flash-lite"
-judge_model: "gemini-2.5-flash"
+reviewer_models: "llama-3.1-8b-instant,openai/gpt-oss-20b,openai/gpt-oss-20b"
+judge_model: "openai/gpt-oss-120b"
 ```
 
 ### Quality Optimized
 
 ```yaml
-reviewer_models: "gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite"
-judge_model: "gemini-2.5-pro"
+reviewer_models: "llama-3.3-70b-versatile,openai/gpt-oss-120b,openai/gpt-oss-20b"
+judge_model: "openai/gpt-oss-120b"
 ```
 
 ## Migration Path
