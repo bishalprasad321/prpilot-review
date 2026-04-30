@@ -33,7 +33,7 @@ For the bot to successfully submit an "APPROVE" or "REQUEST_CHANGES" review deci
 4. Ensure the checkbox for **Allow GitHub Actions to create and approve pull requests** is checked.
 5. Click **Save**.
 
-*(Note: If this setting is not enabled, the action will still be able to post regular comments, but may fail when attempting to submit a formal approval or change request).*
+_(Note: If this setting is not enabled, the action will still be able to post regular comments, but may fail when attempting to submit a formal approval or change request)._
 
 ### 3. Set up the Workflow File
 
