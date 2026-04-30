@@ -1,25 +1,23 @@
 # ADR-004: Idempotency & State Management
 
 **Status:** Accepted  
-**Date:** 2026-04-23  
-**Deciders:** Bishal Prasad  
 **Affects:** Workflow reliability, API cost control, state persistence
 
 ## Context
 
 In GitHub Actions, workflows can be triggered multiple times for the same commit:
 
-1. **PR updated with new commit** → Action runs again
-2. **Workflow re-run** → User manually re-runs on same commit
-3. **Branch force-pushed** → Same code, different commit
-4. **Multiple check suites** → Can trigger same commit multiple times
+1. **PR updated with new commit** -> Action runs again
+2. **Workflow re-run** -> User manually re-runs on same commit
+3. **Branch force-pushed** -> Same code, different commit
+4. **Multiple check suites** -> Can trigger same commit multiple times
 
 Without idempotency, this causes:
 
-- ❌ Duplicate reviews on same code
-- ❌ Wasted API calls
-- ❌ Multiple comments on PR
-- ❌ Higher costs
+- Duplicate reviews on same code
+- Wasted API calls
+- Multiple comments on PR
+- Higher costs
 
 ## Decision
 
@@ -32,9 +30,9 @@ Without idempotency, this causes:
 
 ```
 Check PR commit SHA
-        ↓
+        |
     Is it new?
-        ↓
+        |
     YES: Run review, save SHA
     NO: Skip (already reviewed)
 ```
@@ -90,7 +88,7 @@ class StateManager {
 const alreadyReviewed = stateManager.isAlreadyReviewed(prMetadata.head.sha);
 
 if (alreadyReviewed) {
-  logger.info("⏭️  Commit already reviewed, skipping");
+  logger.info("Skipping: Commit already reviewed");
   core.setOutput("review_decision", "SKIPPED");
   return;
 }
@@ -107,55 +105,55 @@ stateManager.setLastReviewedSha(prMetadata.head.sha);
 
 ```
 Commit ABC123 pushed
-       ↓
+       |
 State: SHA=old, PR=41
-       ↓
+       |
 Commit != last SHA?
-       ↓
-YES → Run review
-      Save: SHA=ABC123, PR=42
+       |
+YES -> Run review
+       Save: SHA=ABC123, PR=42
 ```
 
 ### Scenario 2: Force-Push Same Code
 
 ```
 Force-push to branch (different SHA, same code)
-       ↓
+       |
 State: SHA=old
-       ↓
+       |
 New SHA != old SHA?
-       ↓
-YES → Run review (code changed SHA)
-      (Even though code is same)
+       |
+YES -> Run review (code changed SHA)
+       (Even though code is same)
 ```
 
 ### Scenario 3: Manual Workflow Re-run
 
 ```
 Manual re-run on same commit
-       ↓
+       |
 State: SHA=ABC123 (same)
-       ↓
+       |
 Same SHA?
-       ↓
-YES → Skip (already reviewed)
+       |
+YES -> Skip (already reviewed)
 ```
 
 ### Scenario 4: Workflow Failure & Retry
 
 ```
 Review crashed mid-way
-       ↓
+       |
 State: SHA not updated (crashed before save)
-       ↓
+       |
 Next retry runs fresh review
-       ↓
+       |
 Re-review OK (state catches subsequent reruns)
 ```
 
 ## State Storage Options Considered
 
-### Option 1: Local File (✅ Chosen)
+### Option 1: Local File (Chosen)
 
 ```typescript
 fs.writeFileSync(".ai-pr-state.json", JSON.stringify(state));
@@ -163,15 +161,15 @@ fs.writeFileSync(".ai-pr-state.json", JSON.stringify(state));
 
 **Pros:**
 
-- ✅ Simple, no external dependencies
-- ✅ Works in all GitHub Actions environments
-- ✅ Survives workflow reruns
-- ✅ Git-tracked (can see history)
+- Simple, no external dependencies
+- Works in all GitHub Actions environments
+- Survives workflow reruns
+- Git-tracked (can see history)
 
 **Cons:**
 
-- ❌ Lost if workspace cleaned
-- ❌ Must commit to repo
+- Lost if workspace cleaned
+- Must commit to repo
 
 ### Option 2: GitHub API (Gists)
 
@@ -182,14 +180,14 @@ await octokit.gists.create({ ... });
 
 **Pros:**
 
-- ✅ Survives workspace cleanup
-- ✅ No git history pollution
+- Survives workspace cleanup
+- No git history pollution
 
 **Cons:**
 
-- ❌ Extra API call (cost)
-- ❌ Complex authentication
-- ❌ Gist management overhead
+- Extra API call (cost)
+- Complex authentication
+- Gist management overhead
 
 **Decision:** Use local file, simpler and sufficient
 
@@ -201,12 +199,12 @@ process.env.PRPILOT_LAST_SHA;
 
 **Pros:**
 
-- ✅ Simple
+- Simple
 
 **Cons:**
 
-- ❌ Lost after workflow
-- ❌ Can't persist state between runs
+- Lost after workflow
+- Can't persist state between runs
 
 ### Option 4: GitHub Actions Cache
 
@@ -220,13 +218,13 @@ with:
 
 **Pros:**
 
-- ✅ Designed for this use case
-- ✅ Survives workspace cleanup
+- Designed for this use case
+- Survives workspace cleanup
 
 **Cons:**
 
-- ❌ Adds workflow complexity
-- ❌ Cache can be invalidated
+- Adds workflow complexity
+- Cache can be invalidated
 
 **Decision:** Local file is simpler, sufficient for most cases
 
@@ -270,7 +268,7 @@ if (state.prNumber !== currentPrNumber) {
 
 ## Consequences
 
-### Positive ✅
+### Positive Impacts
 
 - **Cost Reduction** — Saves 30-50% API calls by avoiding reruns
 - **Safety** — Prevents duplicate reviews on same code
@@ -278,7 +276,7 @@ if (state.prNumber !== currentPrNumber) {
 - **Debuggability** — State file in repo for inspection
 - **Idempotent** — Running same workflow twice = same result
 
-### Negative ❌
+### Negative Impacts
 
 - **State Loss** — If workspace cleaned, state lost
 - **Manual Tracking** — User must manage state file
@@ -313,11 +311,11 @@ npm test -- state-manager.test.ts
 
 **Test Cases:**
 
-- ✅ First run: no state, creates new
-- ✅ Same SHA: skips review
-- ✅ Different SHA: runs review
-- ✅ Corrupted state: recovers gracefully
-- ✅ Missing state file: creates default
+- First run: no state, creates new
+- Same SHA: skips review
+- Different SHA: runs review
+- Corrupted state: recovers gracefully
+- Missing state file: creates default
 
 ### Integration Test
 
