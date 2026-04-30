@@ -23,7 +23,19 @@ You need to store your API key securely in your GitHub repository.
 4. Name the secret appropriately (e.g., `GROQ_API_KEY` or `GEMINI_API_KEY`).
 5. Paste your API key as the secret value and save.
 
-### 2. Set up the Workflow File
+### 2. Enable GitHub Actions to Approve Pull Requests
+
+For the bot to successfully submit an "APPROVE" or "REQUEST_CHANGES" review decision, you must explicitly grant this permission in your repository settings.
+
+1. Navigate to your repository on GitHub.
+2. Go to **Settings** > **Actions** > **General**.
+3. Scroll down to the **Workflow permissions** section.
+4. Ensure the checkbox for **Allow GitHub Actions to create and approve pull requests** is checked.
+5. Click **Save**.
+
+*(Note: If this setting is not enabled, the action will still be able to post regular comments, but may fail when attempting to submit a formal approval or change request).*
+
+### 3. Set up the Workflow File
 
 Create a new file in your repository at `.github/workflows/ai-review.yml` and add the following configuration:
 
